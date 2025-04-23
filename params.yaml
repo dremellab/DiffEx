@@ -1,0 +1,12 @@
+counts_file: data/counts_matrix.tsv
+samplesheet: data/samples.tsv
+normalization_method: TMM
+group1: WT_72h
+group2: WT_3d
+sample_column: sampleName
+group_column: groupName
+design_formula: "~ groupName"
+normalized_counts_file: normalized_counts.tsv
+deg_results_file: deg_results.tsv
+log2FC_threshold: 1
+pvalue_threshold: 0.05

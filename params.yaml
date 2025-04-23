@@ -1,5 +1,5 @@
-counts_file: data/counts_matrix.tsv
-samplesheet: data/samples.tsv
+counts_file: .test/counts_matrix.tsv
+samplesheet: .test/samples.tsv
 normalization_method: TMM
 group1: WT_72h
 group2: WT_3d

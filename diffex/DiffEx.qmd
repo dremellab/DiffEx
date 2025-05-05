@@ -23,7 +23,7 @@ params:
   batch: TRUE
   batch_column: "batch"
   design_formula: "~ groupName"
-  output_dir: "~/Desktop/250427/results_250427"
+  outdir: "~/Desktop/250427/results_250427"
   # normalized_counts_file: "normalized_counts.tsv"
   # deg_results_file: "deg_results.tsv"
   log2FC_threshold: 1
@@ -81,7 +81,7 @@ exit_gracefully <- function() {
   knitr::knit_exit()
 }
 # Paths
-output_base <- params$output_dir
+output_base <- params$outdir
 counts_dir <- file.path(output_base, "counts")
 edger_deg_dir <- file.path(output_base, "edgeR_deg")
 deseq2_deg_dir <- file.path(output_base, "DESeq2_deg")

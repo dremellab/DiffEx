@@ -32,7 +32,6 @@ def write_params_yaml(params: dict, outdir: Path) -> Path:
     print(f"📝 params.yaml written to: {params_path}")
     return params_path
 
-
 def get_qmd_path() -> str:
     with pkg_resources.path("diffex", "DiffEx.qmd") as path:
         return str(path)
@@ -48,14 +47,6 @@ def parse_qmd_params(qmd_path: str) -> Dict[str, Any]:
 
     params_block = "params:\n" + match.group(1)
     parsed = yaml.safe_load(params_block)
-
-    # print("✅ Parsed params:", parsed["params"])
-    # exit(0)
-    if not match:
-        raise ValueError("❌ Could not find `params:` block in the .qmd file")
-
-    params_yaml = "params:\n" + match.group(1)
-    parsed = yaml.safe_load(params_yaml)
     return parsed.get("params", {})
 
 def run_quarto(
@@ -66,7 +57,6 @@ def run_quarto(
 ):
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # Copy the QMD file to the output folder
     qmd_name = Path(qmd_file).name
     qmd_in_outdir = outdir / qmd_name
     shutil.copy2(qmd_file, qmd_in_outdir)
@@ -76,32 +66,30 @@ def run_quarto(
         "--to", "html",
         "--no-cache",
         "--self-contained",
-        "--execute-params", str(params_path.name)    ]
+        "--execute-params", str(params_path.name)
+    ]
 
     print(f"🚀 Running Quarto in: {outdir}")
     subprocess.run(command, check=True, cwd=outdir.resolve())
 
-
+@app.command(name="run")
 def build_dynamic_render_command():
     qmd_file = get_qmd_path()
     param_defaults = parse_qmd_params(qmd_file)
 
-    def render(outdir: str = "results", **kwargs):
+    def render(**kwargs):
+        """Run DEG analysis and generate Quarto report."""
+        outdir = kwargs.get("outdir", "results")
         outdir_path = Path(outdir)
 
         final_params = {
             key: kwargs.get(key, default)
             for key, default in param_defaults.items()
-            if key != "outdir"
         }
+        final_params["outdir"] = outdir  # Add outdir explicitly to params
 
-        # # Redirect output paths to outdir
-        # final_params = normalize_paths(final_params, outdir_path)
-
-        # Write params.yaml into the output directory
         params_path = write_params_yaml(final_params, outdir_path)
 
-        # Run Quarto from the current working directory, reading the qmd
         run_quarto(
             params=final_params,
             qmd_file=qmd_file,
@@ -109,17 +97,18 @@ def build_dynamic_render_command():
             outdir=outdir_path
         )
 
-
-    # 🔁 Dynamically build CLI signature
     parameters = [
-    Parameter(
-        name="outdir",
-        kind=Parameter.KEYWORD_ONLY,
-        default=typer.Option("results", help="Directory to store all outputs"),
-        annotation=str
-    )
+        Parameter(
+            name="outdir",
+            kind=Parameter.KEYWORD_ONLY,
+            default=typer.Option("results", help="Directory to store all outputs"),
+            annotation=str
+        )
     ]
+
     for key, default in param_defaults.items():
+        if key == "outdir":
+            continue  # prevent duplicate
         param_type = type(default)
         parameters.append(
             Parameter(
@@ -130,16 +119,32 @@ def build_dynamic_render_command():
                     help=f"Quarto param: `{key}`",
                     show_default=True
                 ),
-                annotation=param_type  # 👈 this tells Typer to use float/int/etc
+                annotation=param_type
             )
         )
 
     render.__signature__ = Signature(parameters)
     return render
 
+app.command(name="run")(build_dynamic_render_command())
+app.command(name="dummy")(lambda: print("Dummy command executed!"))
 
-# Register dynamic command AFTER assigning signature
-app.command(name="render")(build_dynamic_render_command())
+@app.command(name="version")
+def version():
+    """Show the version of DiffEx."""
+    try:
+        from diffex import __version__
+        print(f"DiffEx version: {__version__}")
+    except ImportError:
+        print("DiffEx version: Unknown")
+
+@app.command(name="help")
+def help():
+    """Show help message."""
+    print("DiffEx CLI Help:")
+    print("  - Use `diffex run` to run the Quarto report.")
+    print("  - Use `diffex version` to check the version.")
+    print("  - Use `diffex help` to see this message.")
 
 def main():
     app()

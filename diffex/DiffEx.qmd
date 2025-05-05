@@ -11,18 +11,29 @@ execute:
   warning: false
   message: true
 params:
-  counts_file: ".test/counts_matrix.tsv"
-  samplesheet: ".test/samples.tsv"
-  normalization_method: "TMM" # Normalization method can be TMM or ERCC
-  group1: "WT_72h"
-  group2: "WT_3d"
+  # counts_file: ".test/counts_matrix.tsv"
+  # samplesheet: ".test/samples.tsv"
+  counts_file: "~/Desktop/250427/counts_matrix.tsv"
+  samplesheet: "~/Desktop/250427/samples.tsv"
+  useERCC: TRUE
+  group1: "KOS"
+  group2: "Uninf"
   sample_column: "sampleName"
   group_column: "groupName"
+  batch: TRUE
+  batch_column: "batch"
   design_formula: "~ groupName"
-  normalized_counts_file: "normalized_counts.tsv"
-  deg_results_file: "deg_results.tsv"
+  output_dir: "~/Desktop/250427/results_250427"
+  # normalized_counts_file: "normalized_counts.tsv"
+  # deg_results_file: "deg_results.tsv"
   log2FC_threshold: 1
   pvalue_threshold: 0.05
+  fdr_threshold: 0.05
+  cpm_cutoff: 1
+  cpm_group_fraction: 0.5
+  prerank_choice: "edgeR" # choices: "edgeR", "DESeq2", "combined"
+  host: "Hs" # choices: "Hs", "Mm"
+  genes_selection: "host" # choices: "host", "virus", "both" # filter out genes other than this selection
 ---
 
 # 🔬 Differential Expression Analysis
@@ -36,6 +47,7 @@ This report performs standard DGE analysis using input count data, metadata, and
 suppressPackageStartupMessages({
   library(limma)
   library(edgeR)
+  library(DESeq2)
   library(tibble)
   library(readr)
   library(dplyr)
@@ -51,14 +63,53 @@ suppressPackageStartupMessages({
   library(openxlsx)
   library(glue)
   library(DT)
+  library(ComplexHeatmap)
+  library(clusterProfiler)
+  library(org.Hs.eg.db)
+  library(org.Mm.eg.db)
+  library(msigdbr)
+  library(UpSetR)
+  library(ggplot2)
+  library(plotly)
+  library(openxlsx)
+  library(yaml)
+  library(fs)
 })
+
+exit_gracefully <- function() {
+  message("Exiting early: Debugging script intentionally halted.")
+  knitr::knit_exit()
+}
+# Paths
+output_base <- params$output_dir
+counts_dir <- file.path(output_base, "counts")
+edger_deg_dir <- file.path(output_base, "edgeR_deg")
+deseq2_deg_dir <- file.path(output_base, "DESeq2_deg")
+# gsea_dir <- file.path(output_base, "gsea")
+
+# Create folders
+fs::dir_create(c(output_base,counts_dir, edger_deg_dir, deseq2_deg_dir))
+
+# write out params
+# Convert Quarto parameters (params) to a named list
+yaml_params <- as.list(params)
+
+# Write to YAML file
+yaml::write_yaml(yaml_params, file.path(output_base, "params.yaml"))
 ```
+
+## Reading inputs
 
 ```{r readinput}
 #| code-fold: true
 #| code-summary: "📥 Read Count Matrix and Sample Sheet"
 #| message: true
 #| warning: false
+
+print(glue::glue("📥 Reading input files: "))
+print(glue::glue(params$counts_file, " and "))
+print(glue::glue(params$samplesheet))
+
 counts <- read.table(params$counts_file,
                      check.names = FALSE,  # prevent automatic conversion of hyphen to dot
                      row.names = 1, 
@@ -73,50 +124,115 @@ colnames(counts) <- gsub("-", "_", colnames(counts))
 
 # Read the sample sheet
 samples <- read.table(params$samplesheet, check.names = FALSE, sep = "\t", header = TRUE)
-drop_cols <- intersect(c("path_to_R1_fastq", "path_to_R2_fastq"), colnames(samples))
-samples <- dplyr::select(samples, -all_of(drop_cols))
-
-# Validate required columns exist
-required_cols <- c(params$sample_column, params$group_column)
-missing_cols <- setdiff(required_cols, colnames(samples))
-
-if (length(missing_cols) > 0) {
-  stop("❌ The following required column(s) are missing from the samplesheet:\n",
-       paste(missing_cols, collapse = ", "))
+keep_cols <- c(params$sample_column, params$group_column)
+if (isTRUE(params$batch)) {
+  keep_cols <- c(keep_cols, params$batch_column)
 }
+# Find which of the required columns are actually present
+present_cols <- intersect(keep_cols, colnames(samples))
+
+# Check: all required columns must be present
+if (length(present_cols) != length(keep_cols)) {
+  missing_cols <- setdiff(keep_cols, present_cols)
+  stop("❌ The following required columns are missing from 'samples': ", paste(missing_cols, collapse = ", "))
+}
+
+# Subset to the required columns
+samples <- samples[, present_cols, drop = FALSE]
 
 # Cleanup column values
 samples[[params$sample_column]] <- gsub("-", "_", samples[[params$sample_column]])
 samples[[params$group_column]]  <- gsub("-", "_", samples[[params$group_column]])
+
 ```
 
-```{r normalizationcheck}
+## Filtering by DEG groups
+
+```{r filtercounts}
 #| code-fold: true
-#| code-summary: "🔍 Check for Normalization Method"
+#| code-summary: "🎯 Filter samples and counts matrix for selected groups"
 #| message: true
 #| warning: false
-#| 
-# ✅ Normalization method check
-normalization_method <- tolower(params$normalization)
 
-if (normalization_method == "ercc") {
-  ercc_genes <- grep("^ERCC-", rownames(counts), value = TRUE)
-  num_ercc <- length(ercc_genes)
-  
-  if (num_ercc == 0) {
-    stop("❌ Normalization method is ERCC but no genes starting with 'ERCC-' were found in the counts matrix.")
-  } else {
-    print(glue::glue("🧪 ERCC normalization selected: Found ", num_ercc, " ERCC spike-in genes."))
-  }
+# Get groups from params
+g1 <- params$group1
+g2 <- params$group2
 
-} else if (normalization_method == "tmm") {
-  print(glue::glue("📏 TMM normalization selected."))
-  
-} else {
-  stop("❌ Invalid normalization method: ", params$normalization,
-       "\nSupported methods: 'ERCC' or 'TMM'")
-}
+# Define color palette based on actual group names
+group_colors <- setNames(c("#0072B2", "#D55E00"), c(g1, g2))
+
+print(glue::glue("📥 Selecting samples in groups: "))
+print(glue::glue(g1, " and "))
+print(glue::glue(g2))
+
+# Filter the samplesheet to only include samples from group1 and group2
+selected_samples <- samples[samples[[params$group_column]] %in% c(g1, g2), ]
+
+# Get the sample IDs (assuming there's a 'sample' column)
+sample_ids <- selected_samples$sample
+
+# Now subset the counts matrix
+# Ensure sample columns in counts match sample IDs
+filtered_counts <- counts[, colnames(counts) %in% sample_ids]
+# Report dimensions
+print(glue::glue("📦 Filtered counts matrix: ", nrow(filtered_counts), " genes × ", ncol(filtered_counts), " samples"))
 ```
+
+## Filtering by genes selection
+
+```{r genes_selection}
+#| code-fold: true
+#| code-summary: "🔍 Filter by genes_selection"
+#| message: true
+#| warning: false
+
+print(glue::glue("Genes selection: ", params$genes_selection))
+print(glue::glue("useERCC: ", params$useERCC))
+
+# Filter out genes based on the genes_selection
+if (params$genes_selection == "host") {
+  if (isTRUE(params$useERCC)) {
+    # Filter out viral genes
+    if (params$host == "Hs") {
+      filtered_counts <- filtered_counts[grepl("^ENSG|^ERCC", rownames(filtered_counts)), ]
+    } else if (params$host == "Mm") {
+      filtered_counts <- filtered_counts[grepl("^ENSMUSG|^ERCC", rownames(filtered_counts)), ]
+    }
+  } else {
+    # Filter out viral genes
+    if (params$host == "Hs") {
+      filtered_counts <- filtered_counts[grepl("^ENSG", rownames(filtered_counts)), ]
+    } else if (params$host == "Mm") {
+      filtered_counts <- filtered_counts[grepl("^ENSMUSG", rownames(filtered_counts)), ]
+    }
+  }
+  nercc_genes <- nrow(filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ])
+  print(glue::glue("🦠 Host-only genes selected: ", nrow(filtered_counts), " genes remaining (including ", nercc_genes, " ERCC genes)"))
+} else if (params$genes_selection == "virus") {
+  if (isTRUE(params$useERCC)) {
+    # Filter out host genes .. keep ERCC
+    filtered_counts <- filtered_counts[!grepl("^ENS", rownames(filtered_counts)), ]
+  } else {
+    # Filter out host genes including ERCC
+    filtered_counts <- filtered_counts[!grepl("^ERCC|^ENS", rownames(filtered_counts)), ]
+  }
+  nercc_genes <- nrow(filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ])
+  print(glue::glue("🦠 Virus-only genes selected: ", nrow(filtered_counts), " genes remaining (including ", nercc_genes, " ERCC genes)"))
+} else if (params$genes_selection == "both") {
+  if (!isTRUE(params$useERCC)) {
+    # Keep both host and virus genes .. remove ERCC
+    filtered_counts <- filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ]
+  }
+  nercc_genes <- nrow(filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ])
+  print(glue::glue("🦠 Both host and virus genes included: ", nrow(filtered_counts), " genes remaining (including ", nercc_genes, " ERCC genes)"))
+} else {
+  stop("❌ Invalid mode selected. Choose 'host', 'virus', or 'both'.")
+}
+# Report dimensions
+print(glue::glue("📦 Filtered counts matrix: ", nrow(filtered_counts), " genes × ", ncol(filtered_counts), " samples"))
+#exit_gracefully()
+```
+## Validating group information
 
 ```{r validateinput}
 #| code-fold: true
@@ -126,10 +242,6 @@ if (normalization_method == "ercc") {
 # Check unique group levels in the samplesheet
 valid_groups <- unique(samples[[params$group_column]])
 
-# Get groups from params
-g1 <- params$group1
-g2 <- params$group2
-
 # Find missing groups
 missing_groups <- setdiff(c(g1, g2), valid_groups)
 
@@ -137,7 +249,7 @@ if (length(missing_groups) > 0) {
   stop(paste0("❌ Group(s) from params not found in samples[[params$group_column]]\n",
        paste(missing_groups, collapse = ", ")))
 } else {
-  print(glue::glue("✅ Both group1 and group2 are present in samplesheet."))
+  print(glue::glue("✅ Both group1(",g1,") and group2(",g2,") are present in samplesheet."))
   
   # Check if each group has at least 2 samples
   group_counts <- table(samples$groupName)
@@ -155,88 +267,224 @@ if (length(missing_groups) > 0) {
 
 ```
 
-```{r filtercounts}
+## Setting scaling and normalization
+
+```{r normalizationcheck}
 #| code-fold: true
-#| code-summary: "🎯 Filter samples and counts matrix for selected groups"
+#| code-summary: "🔍 Scale using ERCC"
 #| message: true
 #| warning: false
+#| 
+# ✅ Normalization method check
 
-# Filter the samplesheet to only include samples from group1 and group2
-selected_samples <- samples[samples[[params$group_column]] %in% c(g1, g2), ]
 
-# Get the sample IDs (assuming there's a 'sample' column)
-sample_ids <- selected_samples$sample
+if (isTRUE(params$useERCC)) {
+  ercc_genes <- grep("^ERCC", rownames(counts), value = TRUE)
+  num_ercc <- length(ercc_genes)
+  
+  if (num_ercc == 0) {
+    stop("❌ No genes starting with 'ERCC' were found in the counts matrix.")
+  } else {
+    print(glue::glue("🧪 ERCC scaling selected: Found ", num_ercc, " ERCC spike-in genes."))
+  }
+}
 
-# Now subset the counts matrix
-# Ensure sample columns in counts match sample IDs
-filtered_counts <- counts[, colnames(counts) %in% sample_ids]
-# Report dimensions
-print(glue::glue("📦 Filtered counts matrix: ", nrow(filtered_counts), " genes × ", ncol(filtered_counts), " samples"))
+# Identify ERCC genes
+ercc_rows <- grep("^ERCC", rownames(filtered_counts))
+if (length(ercc_rows) == 0) stop("❌ No ERCC spike-ins found in the counts matrix.")
+
+# Separate ERCC and endogenous counts
+ercc_counts <- filtered_counts[ercc_rows, ]
+endogenous_counts <- filtered_counts[-ercc_rows, ]
+
+if (isTRUE(params$useERCC)) {
+print(glue::glue(nrow(ercc_counts), " ERCC genes and ", nrow(endogenous_counts), " endogenous genes found in the counts matrix."))
+}
+# exit_gracefully()
 ```
+
+
+
+# edgeR analysis
+
+## Set up DGE object
 
 ```{r setupdge}
 #| code-fold: true
 #| code-summary: "🧬 Set up DGE object"
 #| message: true
 #| warning: false
-group <- factor(selected_samples[[params$group_column]], levels = c(g1, g2))
+all_groups <- unique(selected_samples[[params$group_column]])
+other_groups <- setdiff(all_groups, g1)
+group_levels <- c(g1, sort(other_groups))  # g1 first, rest sorted (optional)
 
-if (normalization_method == "ercc") {
-  print(glue::glue("🧪 ERCC normalization selected"))
+group <- factor(selected_samples[[params$group_column]], levels = group_levels)
+group <- relevel(group, ref = g2)
 
-  # Identify ERCC genes
-  ercc_rows <- grep("^ERCC-", rownames(counts))
-  if (length(ercc_rows) == 0) stop("❌ No ERCC spike-ins found in the counts matrix.")
+if (isTRUE(params$useERCC)) {
+  print(glue::glue("🧪 ERCC scaling/TMM normalization will be applied"))
 
-  # Separate ERCC and endogenous counts
-  ercc_counts <- counts[ercc_rows, ]
-  endogenous_counts <- counts[-ercc_rows, ]
+
 
   # ERCC normalization
   dge_ercc <- DGEList(counts = ercc_counts)
   dge_ercc <- calcNormFactors(dge_ercc, method = "TMM")
 
   # Apply ERCC-derived normalization factors
+  # dge <- DGEList(counts = column_to_rownames(endogenous_counts, var = "gene"), group = group)
   dge <- DGEList(counts = endogenous_counts, group = group)
   dge$samples$norm.factors <- dge_ercc$samples$norm.factors
 
-} else if (normalization_method == "tmm") {
+} else {
   print(glue::glue("📏 TMM normalization selected"))
 
-  dge <- DGEList(counts = counts, group = group)
-  dge <- calcNormFactors(dge, method = "TMM")
+  dge <- DGEList(counts = column_to_rownames(endogenous_counts, var = "gene"), group = group)
+  # dge <- calcNormFactors(dge, method = "TMM")
 
-} else {
-  stop("❌ Unsupported normalization method: ", params$normalization,
-       "\nPlease use either 'ERCC' or 'TMM'")
 }
 
-# Filter low-count genes
-keep <- filterByExpr(dge)
-filtered_out <- sum(!keep)
-remaining <- sum(keep)
-dge <- dge[keep, , keep.lib.sizes = FALSE]
+# add batch column to dge$samples
+if (params$batch && params$batch_column %in% colnames(samples)) {
+  dge$samples$Batch <- samples[[params$batch_column]][
+    match(rownames(dge$samples), samples[[params$sample_column]])
+  ]
+}
 
-# Report filtering results
-print(glue::glue("🔍 Filtered out ", filtered_out, " low-count genes."))
-print(glue::glue("✅ Remaining genes for analysis: ", remaining))
+dge_samples_df <- as.data.frame(dge$samples) %>% 
+  rownames_to_column(var = "Sample") %>%
+  mutate(
+    Group = group,
+    LibrarySize = lib.size,
+    NormFactor = signif(norm.factors, 3)
+  ) %>%
+  dplyr::select(Sample, Group, LibrarySize, NormFactor)
+
+# if original samples contains params$batch_column, add it to dge_samples_df
+# Optionally add Batch to dge_samples_df
+if (params$batch_column %in% colnames(samples)) {
+  dge_samples_df$Batch <- selected_samples[[params$batch_column]][match(dge_samples_df$Sample, selected_samples[[params$sample_column]])]
+  # Assign colors based on Batch
+  dge_samples_df$Color <- group_colors[dge_samples_df$Group]
+
+
+# Step 1: Define available shapes and assign per batch
+available_shapes <- c("circle", "square", "diamond", "cross", "x", 
+                      "triangle-up", "triangle-down", "triangle-left", 
+                      "triangle-right", "star")
+
+batches <- unique(dge_samples_df$Batch)
+batch_shapes <- setNames(
+  rep(available_shapes, length.out = length(batches)),
+  batches
+)
+
+# Step 2: Create the plot
+p <- plot_ly()
+
+# Add real colored points (per group), no legend
+p <- p %>% add_trace(
+  data = dge_samples_df,
+  x = ~LibrarySize,
+  y = ~NormFactor,
+  text = ~Sample,
+  type = "scatter",
+  mode = "markers",
+  marker = list(
+    color = dge_samples_df$Color,
+    symbol = unname(batch_shapes[dge_samples_df$Batch])
+  ),
+  showlegend = FALSE
+)
+
+# Step 3: Add dummy black points for legend only
+for (b in batches) {
+  shape <- batch_shapes[b]
+  p <- p %>% add_trace(
+    x = 0, y = 0,  # Off-plot dummy point
+    type = "scatter",
+    mode = "markers",
+    marker = list(
+      color = "black",
+      symbol = shape,
+      size = 5
+    ),
+    name = b,
+    showlegend = TRUE,
+    hoverinfo = "none",
+    legendgroup = b
+  )
+}
+
+# Step 4: Layout
+p <- p %>% layout(
+  title = "Library Size vs Normalization Factor",
+  xaxis = list(title = "Library Size"),
+  yaxis = list(title = "Normalization Factor"),
+  legend = list(title = list(text = "Batch"))
+)
+
+p
+    
+} else {
+
+# Base plot setup
+p <- plot_ly(dge_samples_df, 
+             x = ~LibrarySize, 
+             y = ~NormFactor, 
+             text = ~Sample, 
+             color = ~Group,
+             colors = group_colors,
+             type = "scatter", 
+             mode = "markers")
+
+# Final layout
+p <- p %>% layout(
+  title = "Library Size vs Normalization Factor",
+  xaxis = list(title = "Library Size"),
+  yaxis = list(title = "Normalization Factor")
+)
+
+p
+
+}
+
+# exit_gracefully()
 ```
 
-```{r save_normalized_counts}
+## CPM Filtering
+
+```{r cpmfilter}
 #| code-fold: true
-#| code-summary: "💾 Save Normalized Counts"
+#| code-summary: "🔍 CPM Filtering for edgeR"
 #| message: true
 #| warning: false
-# Save normalized counts to a file
-normalized_counts <- cpm(dge, normalized.lib.sizes = TRUE)
-write.table(normalized_counts, 
-            file = params$normalized_counts_file, 
-            sep = "\t", 
-            quote = FALSE, 
-            col.names = TRUE, 
-            row.names = TRUE)
-print(glue::glue("💾 Normalized counts saved to: ", params$normalized_counts_file))
+
+cpm_mat <- cpm(dge, log = FALSE)
+
+keep_genes <- apply(cpm_mat, 1, function(row) {
+  by_group <- split(row, group)
+  group_pass <- sapply(by_group, function(vals) {
+    mean(vals > params$cpm_cutoff) >= params$cpm_group_fraction
+  })
+  any(group_pass)
+})
+
+print(glue::glue("CPM filtering Criteria: "))
+print(glue::glue("Atleast ", params$cpm_group_fraction * 100, "% of samples in each group must have CPM > ", params$cpm_cutoff))
+print(glue::glue("🔍 Filtered out ", sum(!keep_genes), " genes using CPM filtering. "))
+dge_filtered <- dge[keep_genes, , keep.lib.sizes = FALSE]
+if (isTRUE(params$useERCC)) {
+  dge_filtered$samples$norm.factors <- dge_ercc$samples$norm.factors
+} else {
+  dge_filtered$samples$norm.factors <- calcNormFactors(dge_filtered, method = "TMM")
+}
+remaining <- nrow(dge_filtered)
+print(glue::glue("✅ Remaining genes for edgeR analysis: ", remaining))
+
+# exit_gracefully()
 ```
+
+## Sample Info
 
 ```{r sample_table}
 #| code-fold: true
@@ -244,27 +492,17 @@ print(glue::glue("💾 Normalized counts saved to: ", params$normalized_counts_f
 #| warning: false
 #| message: false
 
-library(dplyr)
-library(knitr)
-
 # Extract sample info from dge object
-sample_info <- dge$samples %>%
+sample_info <- dge_filtered$samples %>%
   tibble::rownames_to_column(var = "Sample") %>%
   mutate(
     Group = group,
     LibrarySize = format(lib.size, big.mark = ","),
-    NormFactor = signif(norm.factors, 3)
+    NormFactor = formatC(norm.factors, format = "f", digits = 3),
+    Batch = if ("Batch" %in% colnames(.)) Batch else NA
   ) %>%
-  select(Sample, Group, LibrarySize, NormFactor)
+  dplyr::select(Sample, Group, LibrarySize, NormFactor, Batch)
 
-# Display table
-kable(
-  sample_info,
-  # caption = "Sample metadata with group, library size, and normalization scaling factor",
-  col.names = c("Sample", "Group", "Library Size", "Norm Factor"),
-  align = "lrlr",
-  format = "html"
-)
 
 DT::datatable(
   sample_info,
@@ -275,29 +513,49 @@ DT::datatable(
   ),
   rownames = FALSE
 )
+
+# exit_gracefully()
+
 ```
 
-
-# 📊 Data Visualization
-## Normalized counts Distribution plot
-
-```{r plot_counts_violin_by_sample}
+```{r save_normalized_counts}
 #| code-fold: true
-#| code-summary: "🎻 Violin Plot of Normalized Counts by Sample (Colored by Group)"
-#| fig.width: 10
-#| fig.height: 6
-#| fig.cap: "Violin plot of normalized counts by sample, colored by group"
-#| out.width: "100%"
-#| out.height: "100%"
-#| fig.align: "center"
+#| code-summary: "💾 Save Normalized Counts"
+#| message: true
 #| warning: false
+# Save normalized counts to a file
+normalized_counts <- cpm(dge, normalized.lib.sizes = TRUE, log = TRUE)
+as.data.frame(normalized_counts[keep_genes,]) %>%
+  rownames_to_column(var = "gene") -> normalized_counts
+normalized_counts_file <- file.path(counts_dir, "edgeR_logCPM_counts.filtered.tsv")
+write.table(normalized_counts, 
+            file = normalized_counts_file, 
+            sep = "\t", 
+            quote = FALSE, 
+            col.names = TRUE, 
+            row.names = FALSE)
+print(glue::glue("💾 Normalized counts saved to: ", normalized_counts_file))
+# exit_gracefully()
+```
 
-# Define color palette based on actual group names
-group_colors <- setNames(c("#0072B2", "#D55E00"), c(g1, g2))
+```{r functions}
+#| code-fold: true
+#| code-summary: "🔧 Functions"
+#| message: true
+#| warning: false
+#| echo: false
 
-# Prepare data
+log2FC_threshold <- params$log2FC_threshold
+pvalue_threshold <- params$pvalue_threshold
+fdr_threshold <- params$fdr_threshold
+
+make_violin_plot <- function(normalized_counts,
+                             xlab = "Sample",
+                             ylab = "Normalized Counts",
+                             title = "Violin Plot of Normalized Counts by Sample") {
+  # Prepare data
 violin_data <- as.data.frame(normalized_counts) %>%
-  rownames_to_column(var = "gene") %>%
+  # rownames_to_column(var = "gene") %>%
   pivot_longer(-gene, names_to = "sample", values_to = "normalized_counts")
 
 violin_data$group <- selected_samples[[params$group_column]][match(violin_data$sample, selected_samples[[params$sample_column]])]
@@ -314,36 +572,28 @@ violin_plot <- ggplot(violin_data, aes(x = sample, y = normalized_counts, fill =
   scale_fill_manual(values = group_colors) +
   theme_bw() +
   labs(
-    title = "Violin Plot of Normalized Counts by Sample (log10)",
-    x = "Sample",
-    y = "Normalized Counts (log10 scale)",
+    title = title,
+    x = xlab,
+    y = ylab,
     fill = "Group"
   ) +
   theme(
     axis.text.x = element_text(angle = 90, hjust = 1),
     legend.position = "top"
-  )
+  ) + coord_flip()
+return(violin_plot)
+}
 
-print(violin_plot)
-```
+make_pca_plots <- function(normalized_counts){
 
-
-## 2-D PCA plot
-
-```{r plot_pca_plotly}
-#| code-fold: true
-#| code-summary: "🧬 PCA Plot with Group Colors and Variance Labels"
-#| fig.width: 8
-#| fig.height: 6
-#| fig.cap: "PCA plot of normalized counts (colored by group)"
-#| out.width: "100%"
-#| out.height: "100%"
-#| fig.align: "center"
-#| fig.show: "hold"
-#| warning: false
-
+normalized_counts %>% column_to_rownames(var = "gene") -> normalized_counts
 # Perform PCA
+# Remove constant genes (zero variance across samples)
+normalized_counts <- normalized_counts[apply(normalized_counts, 1, function(x) var(x) > 0), ]
+
+# Then run PCA
 pca <- prcomp(t(normalized_counts), center = TRUE, scale. = TRUE)
+
 pca_data <- as.data.frame(pca$x)
 
 # Calculate % variance explained
@@ -364,7 +614,7 @@ pca_data$hover <- paste0(
 )
 
 # Create interactive PCA plot
-plot_ly(
+pca2d <- plot_ly(
   data = pca_data,
   x = ~PC1,
   y = ~PC2,
@@ -383,24 +633,6 @@ plot_ly(
     legend = list(orientation = "h", x = 0.3, y = -0.15)
   )
 
-# print(pca_plot)
-```
-
-
-## 3-D PCA plot
-
-```{r plot_pca_3d_plotly}
-#| code-fold: true
-#| code-summary: "🧬 3D PCA Plot"
-#| fig.width: 8
-#| fig.height: 6
-#| fig.cap: "3D PCA plot of normalized counts, colored by group"
-#| out.width: "100%"
-#| out.height: "100%"
-#| fig.align: "center"
-#| fig.show: "hold"
-#| warning: false
-
 # Create hover text
 pca_data$hover <- paste0(
   "Sample: ", pca_data$sample,
@@ -411,7 +643,7 @@ pca_data$hover <- paste0(
 )
 
 # 3D interactive PCA plot
-plot_ly(
+pca3d <- plot_ly(
   data = pca_data,
   x = ~PC1,
   y = ~PC2,
@@ -433,109 +665,34 @@ plot_ly(
     ),
     legend = list(orientation = "h", x = 0.3, y = -0.1)
   )
-
-# print(pca_3d_plot)
-```
-
-## DEG results
-
-```{r design}
-#| code-fold: true
-#| code-summary: "🧩 Design Matrix"
-
-# Create design matrix
-design <- model.matrix(as.formula(params$design_formula), data = selected_samples)
-# Report design matrix  dimensions
-print(glue::glue("📊 Design matrix dimensions: ", nrow(design), " samples × ", ncol(design), " variables"))
-# Check for singularities
-if (any(is.na(design))) {
-  stop("❌ Design matrix contains NA values. Please check your samplesheet and design formula.")
+    return(list(
+    pca2d = pca2d,
+    pca3d = pca3d
+  ))
 }
 
-# Estimate dispersion
-dge <- estimateDisp(dge, design)
+make_volcano_plot <- function(volcano_df, 
+                              pvalue_column_name = "PValue",
+                              logFC_column_name = "logFC",
+                              FDR_column_name = "FDR"
+){
 
-# Fit GLM and run LRT
-fit <- glmFit(dge, design)
-lrt <- glmLRT(fit)
+# remove all rows where Pvalue is NA
+volcano_df <- volcano_df[!is.na(volcano_df[[pvalue_column_name]]), ]
+# remove all rows where logFC is NA
+volcano_df <- volcano_df[!is.na(volcano_df[[logFC_column_name]]), ]
 
-# Save DE table
-top_table <- topTags(lrt, n = Inf)$table
+# Rename logFC column to "logFC" if needed
+if (logFC_column_name != "logFC") {
+  names(volcano_df)[names(volcano_df) == logFC_column_name] <- "logFC"
+}
+if (pvalue_column_name != "PValue") {
+  names(volcano_df)[names(volcano_df) == pvalue_column_name] <- "PValue"
+}
+if (FDR_column_name != "FDR") {
+  names(volcano_df)[names(volcano_df) == FDR_column_name] <- "FDR"
+}
 
-# Get test summary
-summary(decideTests(lrt))
-```
-
-## MA Plot
-
-```{r maplot}
-#| code-fold: true
-#| code-summary: "📈 MA Plot"
-#| fig.width: 8
-#| fig.height: 6
-#| fig.cap: "MA plot of differential expression results"
-#| out.width: "100%"
-#| out.height: "100%"
-#| fig.align: "center"
-#| fig.show: "hold"
-
-# Extract results table
-res_table <- topTags(lrt, n = Inf)$table
-
-# Add average logCPM expression (from the DGE object)
-res_table$AveExpr <- rowMeans(cpm(dge, log = TRUE))
-
-# Optionally, add a significance column for coloring
-res_table$Significant <- ifelse(res_table$FDR < 0.05, "FDR < 0.05", "Not Sig")
-
-# Interactive MA plot
-ma_plot <- plot_ly(
-  data = res_table,
-  x = ~AveExpr,
-  y = ~logFC,
-  type = 'scatter',
-  mode = 'markers',
-  color = ~Significant,
-  colors = c("gray", "red"),
-  text = ~paste("Gene:", rownames(res_table),
-                "<br>logFC:", round(logFC, 2),
-                "<br>FDR:", signif(FDR, 3)),
-  hoverinfo = "text"
-) %>%
-  layout(
-    title = "🧬 Interactive MA Plot",
-    xaxis = list(title = "Average logCPM"),
-    yaxis = list(title = "log2 Fold Change"),
-    shapes = list(
-      list(type = "line", x0 = min(res_table$AveExpr), x1 = max(res_table$AveExpr),
-           y0 = 0, y1 = 0, line = list(dash = "dash", color = "black"))
-    )
-  )
-
-# print plot
-ma_plot
-# print(ma_plot)
-```
-
-## Volcano Plot
-
-```{r volcano_plotly_4color}
-#| code-fold: true
-#| code-summary: "🌋 Interactive Volcano Plot (4 colors like EnhancedVolcano)"
-#| fig.width: 8
-#| fig.height: 10
-#| fig.cap: "Interactive volcano plot mimicking EnhancedVolcano coloring"
-#| out.width: "100%"
-#| out.height: "100%"
-#| fig.align: "center"
-#| warning: false
-
-log2FC_threshold <- params$log2FC_threshold
-pvalue_threshold <- params$pvalue_threshold
-
-# Prepare data
-volcano_df <- topTags(lrt, n = Inf)$table
-volcano_df$gene <- rownames(volcano_df)
 volcano_df$logP <- -log10(volcano_df$PValue)
 
 # Categorize each gene
@@ -549,14 +706,14 @@ sig_colors <- c(
   "NS" = "gray",
   "Log2FC" = "#009E73",             # Green
   "p-value" = "#0072B2",            # Blue
-  "p-value and log2FC" = "#D55E00"  # Red
+  "p-value and log2FC" = "red"  # Red
 )
 
 # Create hover text
 volcano_df$hover <- paste0(
   "Gene: ", volcano_df$gene,
   "<br>logFC: ", round(volcano_df$logFC, 2),
-  "<br>FDR: ", signif(volcano_df$FDR, 3),
+  "<br>FDR: ", ifelse(is.na(volcano_df$FDR), NA, signif(volcano_df$FDR, 3)),
   "<br>PValue: ", signif(volcano_df$PValue, 3)
 )
 
@@ -571,7 +728,7 @@ volcano_plotly <- plot_ly(
   colors = sig_colors,
   text = ~hover,
   hoverinfo = "text",
-  marker = list(size = 6, line = list(width = 0.5, color = 'black'))
+  marker = list(size = 6)
 ) %>%
   layout(
     title = list(text = paste0("Volcano Plot: ", g1, " vs ", g2)),
@@ -580,7 +737,7 @@ volcano_plotly <- plot_ly(
     legend = list(title = list(text = "Significance"), orientation = "h", x = 0.3, y = -0.2),
     shapes = list(
       # Horizontal line at -log10(0.05)
-      list(type = "line", x0 = min(volcano_df$logFC), x1 = max(volcano_df$logFC),
+      list(type = "line", x0 = min(volcano_df$logFC), x1 = max(volcano_df$PValue),
            y0 = -log10(pvalue_threshold), y1 = -log10(pvalue_threshold),
            line = list(dash = "dot", width = 1, color = "black")),
       # Vertical line at logFC = -1
@@ -593,35 +750,650 @@ volcano_plotly <- plot_ly(
            line = list(dash = "dot", width = 1, color = "black"))
     )
   )
+return(volcano_plotly)
+}
 
-volcano_plotly
 ```
 
-# 💾 Save Results
 
-```{r save_results}
+<!-- # 📊 Data Visualization -->
+## Normalized counts Distribution plot
+
+```{r plot_counts_violin_by_sample}
 #| code-fold: true
-#| code-summary: "💾 Save Results"
-#| message: true
+#| code-summary: "🎻 Violin Plot of Normalized Counts by Sample (Colored by Group)"
+#| fig.width: 10
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
 #| warning: false
-top_table %>% rownames_to_column(var = "geneName" ) -> out_table
 
-# Save the top table to a file
-write.table(out_table, 
-            file = params$deg_results_file, 
+# Create violin plot
+violin_plot <- make_violin_plot(normalized_counts,
+                                 xlab = "Sample",
+                                 ylab = "Normalized Counts (logCPM)",
+                                 title = "Violin Plot of Normalized Counts by Sample (edgeR)")
+
+print(violin_plot)
+# exit_gracefully()
+```
+
+
+## 2-D PCA plot
+
+```{r plot_pca_plotly}
+#| code-fold: true
+#| code-summary: "🧬 PCA Plot with Group Colors and Variance Labels"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+pcas <- make_pca_plots(normalized_counts)
+pcas$pca2d
+
+# exit_gracefully()
+# print(pca_plot)
+```
+
+
+## 3-D PCA plot
+
+```{r plot_pca_3d_plotly}
+#| code-fold: true
+#| code-summary: "🧬 3D PCA Plot"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+
+pcas$pca3d
+# exit_gracefully()
+# print(pca_3d_plot)
+```
+
+## DEG results
+
+```{r design}
+#| code-fold: true
+#| code-summary: "🧩 Design Matrix"
+
+
+selected_samples[[params$group_column]] <- relevel(factor(selected_samples[[params$group_column]]), ref = "Uninf")
+# Create design matrix
+design <- model.matrix(as.formula(params$design_formula), data = selected_samples)
+# Report design matrix  dimensions
+print(glue::glue("📊 Design matrix dimensions: ", nrow(design), " samples × ", ncol(design), " variables"))
+# Check for singularities
+if (any(is.na(design))) {
+  stop("❌ Design matrix contains NA values. Please check your samplesheet and design formula.")
+}
+
+# Estimate dispersion
+dge <- estimateDisp(dge_filtered, design)
+
+# Fit GLM and run LRT
+fit <- glmFit(dge, design)
+lrt <- glmLRT(fit)
+
+# Save DE table
+top_table <- topTags(lrt, n = Inf)$table
+
+# # Get test summary
+# deg_results_stats_df <- summary(decideTests(lrt))
+# as.data.frame(deg_results_stats_df) %>% rownames_to_column(var = "Group") -> deg_results_stats_df
+# colnames(deg_results_stats_df) <- c("Group", "Direction", "dummy", "No. of genes")
+# # Remove dummy column
+# deg_results_stats_df <- deg_results_stats_df %>% dplyr::select(-dummy) %>% dplyr::select(-Group)
+
+# Extract results table
+res_table_edger <- topTags(lrt, n = Inf)$table
+
+# Add average logCPM expression (from the DGE object)
+res_table_edger$AveExpr <- rowMeans(cpm(dge, log = TRUE))
+
+# Categorize gene regulation direction
+res_table_edger$Direction <- dplyr::case_when(
+  res_table_edger$FDR < fdr_threshold & res_table_edger$logFC > log2FC_threshold ~ "Up",
+  res_table_edger$FDR < fdr_threshold & res_table_edger$logFC < -log2FC_threshold ~ "Down",
+  TRUE ~ "NotSig"
+)
+
+# Create summary table
+deg_results_stats_df <- as.data.frame(table(res_table_edger$Direction))
+colnames(deg_results_stats_df) <- c("Direction", "No. of genes")
+
+# Reorder rows to: Down, NotSig, Up
+deg_results_stats_df <- deg_results_stats_df[match(c("Down", "NotSig", "Up"), deg_results_stats_df$Direction), ]
+
+# write results table to file
+results_file <- file.path(edger_deg_dir, "edgeR_results.tsv")
+write.table(res_table_edger %>% rownames_to_column(var = "gene"), 
+            file = results_file, 
             sep = "\t", 
             quote = FALSE, 
             col.names = TRUE, 
             row.names = FALSE)
-print(glue::glue("💾 Differential expression results saved to: ", params$deg_results_file))
-# Save as Excel (xlsx)
-# Derive Excel filename by replacing .tsv or .txt with .xlsx
-excel_file <- sub("\\.(tsv|txt)$", ".xlsx", params$deg_results_file)
 
-# Write to Excel using openxlsx
-openxlsx::write.xlsx(out_table, file = excel_file, asTable = TRUE)
-print(glue::glue("💾 Excel version of DE results saved to: ", excel_file))
+print(glue::glue("💾 edgeR DE results saved to: ", results_file))
+```
+
+```{r deg_results_table}
+#| code-fold: true
+#| code-summary: "📊 DE Results Table"
+#| message: true
+#| warning: false
+
+DT::datatable(
+  deg_results_stats_df,
+  options = list(
+    pageLength = 10,
+    autoWidth = TRUE,
+    columnDefs = list(list(className = 'dt-center', targets = "_all"))
+  ),
+  rownames = FALSE
+)
+# exit_gracefully()
+```
+
+## MA Plot
+
+```{r maplot}
+#| code-fold: true
+#| code-summary: "📈 MA Plot"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+
+
+# Optionally, add a significance column for coloring
+res_table_edger$Significant <- ifelse(res_table_edger$FDR < fdr_threshold, paste0("FDR < ",fdr_threshold), "Not Sig")
+
+# Interactive MA plot
+ma_plot <- plot_ly(
+  data = res_table_edger,
+  x = ~AveExpr,
+  y = ~logFC,
+  type = 'scatter',
+  mode = 'markers',
+  color = ~Significant,
+  colors = c("red", "gray"),
+  text = ~paste("Gene:", rownames(res_table_edger),
+                "<br>logFC:", round(logFC, 2),
+                "<br>FDR:", signif(FDR, 3)),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "🧬 Interactive MA Plot",
+    xaxis = list(title = "Average logCPM"),
+    yaxis = list(title = "log2 Fold Change"),
+    shapes = list(
+      list(type = "line", x0 = min(res_table_edger$AveExpr), x1 = max(res_table_edger$AveExpr),
+           y0 = 0, y1 = 0, line = list(dash = "dash", color = "black"))
+    )
+  )
+
+# print plot
+ma_plot
+# exit_gracefully()
+# print(ma_plot)
+```
+
+## Volcano Plot
+
+```{r volcano_plotly_4color}
+#| code-fold: true
+#| code-summary: "🌋 Interactive Volcano Plot (4 colors like EnhancedVolcano)"
+#| fig.width: 8
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| warning: false
+
+
+# Prepare data
+volcano_df <- topTags(lrt, n = Inf)$table
+volcano_df$gene <- rownames(volcano_df)
+volcano_plotly <- make_volcano_plot(volcano_df,
+                              pvalue_column_name = "PValue",
+                              logFC_column_name = "logFC",
+                              FDR_column_name = "FDR")
+
+
+volcano_plotly
+```
+
+# DESeq2 analysis
+
+## Set up DESeq2 object
+
+```{r setupdeseq2}
+#| code-fold: true
+#| code-summary: "🧬 Set up DESeq2 object"
+#| message: true
+#| warning: false
+#| echo: false
+
+# # Rename columns only if they exist
+# colnames(selected_samples)[colnames(selected_samples) == params$sample_column] <- "sample"
+# colnames(selected_samples)[colnames(selected_samples) == params$group_column] <- "group"
+
+if ("batch" %in% colnames(selected_samples)) {
+  colnames(selected_samples)[colnames(selected_samples) == params$batch_column] <- "batch"
+}
+
+if (isTRUE(params$useERCC)) {
+  print(glue("🧪 ERCC scaling will be applied"))
+
+  # Create DESeqDataSet for ERCC and calculate size factors
+  dds_ercc <- DESeqDataSetFromMatrix(countData = ercc_counts, colData = selected_samples, design = ~1)
+  dds_ercc <- estimateSizeFactors(dds_ercc)
+
+  # Create DESeqDataSet for endogenous counts
+  dds <- DESeqDataSetFromMatrix(countData = endogenous_counts, colData = selected_samples, design = ~groupName)
+
+  # Apply ERCC-derived size factors
+  sizeFactors(dds) <- sizeFactors(dds_ercc)
+} else {
+  print(glue("📏 Default DESeq2 size factor normalization"))
+  dds <- DESeqDataSetFromMatrix(countData = endogenous_counts, colData = selected_samples, design = ~groupName)
+  dds <- estimateSizeFactors(dds)
+}
+
+# Pull normalized library size (sizeFactors) and original library size
+dds_samples_df <- as.data.frame(colData(dds)) %>%
+  rownames_to_column(var = "Sample") %>%
+  mutate(
+    Group = groupName,
+    LibrarySize = colSums(counts(dds)),
+    NormFactor = signif(sizeFactors(dds), 3)
+  ) %>%
+  dplyr::select(Sample, Group, LibrarySize, NormFactor)
+
+# Add Batch column and colors
+if (params$batch && params$batch_column %in% colnames(samples)) {
+  dds_samples_df$Batch <- selected_samples[[params$batch_column]][match(dds_samples_df$Sample, selected_samples[[params$sample_column]])]
+  dds_samples_df$Color <- group_colors[dds_samples_df$Group]
+
+  # Define shapes per batch
+  available_shapes <- c("circle", "square", "diamond", "cross", "x", 
+                        "triangle-up", "triangle-down", "triangle-left", 
+                        "triangle-right", "star")
+  batches <- unique(dds_samples_df$Batch)
+  batch_shapes <- setNames(
+    rep(available_shapes, length.out = length(batches)),
+    batches
+  )
+
+  # Base plot
+  p <- plot_ly()
+
+  # Real points (color by group, shape by batch)
+  p <- p %>% add_trace(
+    data = dds_samples_df,
+    x = ~LibrarySize,
+    y = ~NormFactor,
+    text = ~Sample,
+    type = "scatter",
+    mode = "markers",
+    marker = list(
+      color = dds_samples_df$Color,
+      symbol = unname(batch_shapes[dds_samples_df$Batch]),
+      size = 6
+    ),
+    name="", # prevents 'trace 0' from showing in hover
+    showlegend = FALSE
+  )
+
+  # Dummy points for legend (black, shape only)
+  for (b in batches) {
+    shape <- batch_shapes[b]
+    p <- p %>% add_trace(
+      x = 0, y = 0,
+      type = "scatter",
+      mode = "markers",
+      marker = list(
+        color = "black",
+        symbol = shape,
+        size = 6
+      ),
+      name = b,
+      showlegend = TRUE,
+      hoverinfo = "none",
+      legendgroup = b
+    )
+  }
+
+  # Layout
+  p <- p %>% layout(
+    title = "Library Size vs Normalization Factor (DESeq2)",
+    xaxis = list(title = "Library Size"),
+    yaxis = list(title = "Size Factor"),
+    legend = list(title = list(text = "Batch"))
+  )
+} else {
+  # Simple plot without batch encoding
+  p <- plot_ly(dds_samples_df,
+               x = ~LibrarySize,
+               y = ~NormFactor,
+               text = ~Sample,
+               color = ~Group,
+               colors = group_colors,
+               type = "scatter",
+               mode = "markers",
+               marker = list(size = 6))
+
+  p <- p %>% layout(
+    title = "Library Size vs Normalization Factor (DESeq2)",
+    xaxis = list(title = "Library Size"),
+    yaxis = list(title = "Size Factor")
+  )
+}
+
+p
+
+```
+
+```{r deseq2_sampleinfo}
+#| code-fold: true
+#| code-summary: "📋 DESeq2 Sample Metadata with Library Sizes and Norm Factors"
+#| warning: false
+#| message: false
+#| echo: false
+
+# Extract sample info from DESeq2 object
+sample_info_deseq2 <- as.data.frame(colData(dds)) %>%
+  rownames_to_column(var = "Sample") %>%
+  mutate(
+    Group = group,
+    LibrarySize = format(colSums(counts(dds)), big.mark = ","),
+    NormFactor = formatC(sizeFactors(dds), format = "f", digits = 3),
+    Batch = if ("Batch" %in% names(.)) Batch 
+          else if ("batch" %in% names(.)) batch 
+          else NA
+  ) %>%
+  dplyr::select(Sample, Group, LibrarySize, NormFactor, Batch)
+
+DT::datatable(
+  sample_info_deseq2,
+  options = list(
+    pageLength = 10,
+    autoWidth = TRUE,
+    columnDefs = list(list(className = 'dt-center', targets = "_all"))
+  ),
+  rownames = FALSE
+)
+# exit_gracefully()
+```
+
+```{r save_deseq2_normalized_counts}
+#| code-fold: true
+#| code-summary: "💾 Save DESeq2 Normalized Counts"
+#| message: true
+#| warning: false
+#| echo: false
+
+# Save DESeq2 normalized counts
+normalized_counts_deseq2 <- counts(dds, normalized = TRUE)
+as.data.frame(normalized_counts_deseq2) %>%
+  rownames_to_column(var = "gene") -> normalized_counts_deseq2
+normalized_counts_deseq2_file <- file.path(counts_dir, "DESeq2_normalized_counts.tsv")
+write.table(normalized_counts_deseq2, 
+            file = normalized_counts_deseq2_file, 
+            sep = "\t", 
+            quote = FALSE, 
+            col.names = TRUE, 
+            row.names = FALSE)
+print(glue::glue("💾 DESeq2 normalized counts saved to: ", normalized_counts_deseq2_file))
+```
+
+## Normalized counts Distribution plot
+
+```{r plot_counts_violin_by_sample_deseq2}
+#| code-fold: true
+#| code-summary: "🎻 Violin Plot of Normalized Counts by Sample (Colored by Group)"
+#| fig.width: 10
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+
+# Create violin plot
+violin_plot_deseq2 <- make_violin_plot(normalized_counts_deseq2,
+                                        xlab = "Sample",
+                                        ylab = "Normalized Counts",
+                                        title = "Violin Plot of Normalized Counts by Sample (DESeq2)")
+                                        
+
+print(violin_plot_deseq2)
+# exit_gracefully()                            
 ```
 
 
+## 2-D PCA plot
+
+```{r plot_pca_plotly_deseq2}
+#| code-fold: true
+#| code-summary: "🧬 PCA Plot with Group Colors and Variance Labels"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+pcas_deseq2 <- make_pca_plots(normalized_counts_deseq2)
+pcas_deseq2$pca2d
+
+# exit_gracefully()
+# print(pca_plot)
+```
+
+
+## 3-D PCA plot
+
+```{r plot_pca_3d_plotly_deseq2}
+#| code-fold: true
+#| code-summary: "🧬 3D PCA Plot"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+
+pcas_deseq2$pca3d
+# exit_gracefully()
+# print(pca_3d_plot)
+```
+
+## DEG results
+
+```{r deseq2_results}
+#| code-fold: true
+#| code-summary: "🧩 DESeq2 Results"
+#| message: true
+#| warning: false
+#| echo: false
+
+# Run DESeq2 analysis
+dds <- DESeq(dds)
+
+# Extract the variable name from formula string
+design_variable <- trimws(gsub("~", "", params$design_formula))
+
+# Construct contrast vector
+contrast_vector <- c(design_variable, g1, g2)
+
+# Run DESeq2 results with contrast
+res <- results(dds, contrast = contrast_vector)
+# Add gene names
+res$gene <- rownames(res)
+# Save DESeq2 results to a file
+res_file <- file.path(deseq2_deg_dir, "DESeq2_results.tsv")
+write.table(res, 
+            file = res_file, 
+            sep = "\t", 
+            quote = FALSE, 
+            col.names = TRUE, 
+            row.names = TRUE)
+print(glue::glue("💾 DESeq2 results saved to: ", res_file))
+
+# Assume 'res' is your DESeq2 results object
+res_table_deseq2 <- as.data.frame(res)
+
+# Add gene IDs as a column (if rownames are gene IDs)
+res_table_deseq2$gene <- rownames(res_table_deseq2)
+
+# Categorize gene direction
+res_table_deseq2$Direction <- case_when(
+  !is.na(res_table_deseq2$padj) & res_table_deseq2$padj < fdr_threshold & res_table_deseq2$log2FoldChange >  log2FC_threshold ~ "Up",
+  !is.na(res_table_deseq2$padj) & res_table_deseq2$padj < fdr_threshold & res_table_deseq2$log2FoldChange < -log2FC_threshold ~ "Down",
+  TRUE ~ "NotSig"
+)
+
+# Create summary stats table
+deg_results_stats_df_deseq2 <- as.data.frame(table(res_table_deseq2$Direction))
+colnames(deg_results_stats_df_deseq2) <- c("Direction", "No. of genes")
+
+# Reorder
+deg_results_stats_df_deseq2 <- deg_results_stats_df_deseq2[match(c("Down", "NotSig", "Up"), deg_results_stats_df_deseq2$Direction), ]
+```
+
+```{r show_deseq2_results}
+#| code-fold: true
+#| code-summary: "📊 DESeq2 Results Summary"
+#| message: false
+#| warning: false
+#| echo: false
+
+# Show interactive table
+DT::datatable(deg_results_stats_df_deseq2, rownames = FALSE, 
+              options = list(
+                pageLength = 10,
+                autoWidth = TRUE,
+                columnDefs = list(list(className = 'dt-center', targets = "_all"))))
+
+```
+
+```{r volcano_plotly_deseq2}
+#| code-fold: true
+#| code-summary: "🌋 Interactive Volcano Plot (DESeq2)"
+#| fig.width: 8
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+
+# Prepare data
+volcano_df_deseq2 <- res_table_deseq2
+volcano_df_deseq2$gene <- rownames(volcano_df_deseq2)
+volcano_plotly <- make_volcano_plot(volcano_df_deseq2,
+                              pvalue_column_name = "pvalue",
+                              logFC_column_name = "log2FoldChange",
+                              FDR_column_name = "padj")
+#
+volcano_plotly
+```
+
+
+# Combined DEG Results
+
+```{r combined_results}
+#| code-fold: true
+#| code-summary: "🧬 Combined DEG Results"
+#| message: true
+#| warning: false
+#| echo: false
+
+if (!"gene" %in% colnames(res_table_edger)) {
+  res_table_edger <- res_table_edger %>% rownames_to_column(var = "gene")
+}
+names(res_table_edger)[names(res_table_edger) == "logFC"] <- "log2FoldChange"
+
+
+if (!"gene" %in% colnames(res_table_deseq2)) {
+  res_table_deseq2 <- res_table_deseq2 %>% rownames_to_column(var = "gene")
+}
+names(res_table_deseq2)[names(res_table_deseq2) == "pvalue"] <- "PValue"
+names(res_table_deseq2)[names(res_table_deseq2) == "padj"] <- "FDR"
+
+res_table_edger <- res_table_edger %>%
+  dplyr::select(gene, log2FoldChange, PValue, FDR, AveExpr, Direction)
+
+res_table_deseq2 <- res_table_deseq2 %>%
+  dplyr::select(gene, log2FoldChange, PValue, FDR, baseMean, Direction)
+
+# Combine results from edgeR and DESeq2
+combined_results <- full_join(res_table_edger, res_table_deseq2, by = "gene", suffix = c("_edgeR", "_DESeq2"))
+combined_results[combined_results == ""] <- NA
+
+names(combined_results)[names(combined_results) == "AveExpr"] <- "AveExpr_edgeR"
+names(combined_results)[names(combined_results) == "baseMean"] <- "baseMean_DESeq2"
+
+output_file <- file.path(output_base, "combined_deg_results.tsv")
+write.table(combined_results, 
+            file = output_file, 
+            sep = "\t", 
+            quote = FALSE, 
+            col.names = TRUE, 
+            row.names = FALSE)
+print(glue::glue("💾 Combined results saved to: ", output_file))
+# Show interactive table
+
+combined_results$Direction_edgeR <- as.character(combined_results$Direction_edgeR)
+combined_results$Direction_DESeq2 <- as.character(combined_results$Direction_DESeq2)
+
+# Assuming combined_results is your data frame
+deg_comparison_table <- combined_results %>%
+  dplyr::count(Direction_edgeR, Direction_DESeq2, name = "Count") %>%
+  arrange(desc(Count))
+
+deg_comparison_table$Match <- deg_comparison_table$Direction_edgeR == deg_comparison_table$Direction_DESeq2
+
+# Display with highlighting where directions match
+DT::datatable(deg_comparison_table, 
+          rownames = FALSE,
+          options = list(pageLength = 10,
+                         autoWidth = TRUE, 
+                         ordering = FALSE, 
+                         columnDefs = list(list(className = 'dt-center',visible = FALSE, targets = 3)))) %>%
+  formatStyle(
+    columns = "Match",
+    target = "row",
+    backgroundColor = styleEqual(c(TRUE, FALSE), c("#D4EDDA", NA))
+  )
+
+# Only consider rows where Match is TRUE or FALSE (exclude NA)
+valid_rows <- !is.na(deg_comparison_table$Match)
+
+total <- sum(deg_comparison_table$Count[valid_rows])
+matched <- sum(deg_comparison_table$Count[deg_comparison_table$Match == TRUE],na.rm=TRUE)
+
+concordance_percent <- round(100 * matched / total, 2)
+
+cat("✅ edgeR-DESeq2 Concordance: ", concordance_percent, "%\n")
+```
+
+
+```{r exit}
+exit_gracefully()
+print(glue::glue(" Exiting early: Debugging script intentionally halted."))
+```
 

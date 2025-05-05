@@ -1,4 +1,5 @@
 site/
+.Rproj.user/
 .DS_Store
 *.pyc
 *.pyo
@@ -10,3 +11,6 @@ deg_results.tsv
 deg_results.xlsx
 DiffEx.html
 normalized_counts.tsv
+diffex/DiffEx_cache/
+diffex/DiffEx_files/
+diffex/run.sh

@@ -14,3 +14,4 @@ normalized_counts.tsv
 diffex/DiffEx_cache/
 diffex/DiffEx_files/
 diffex/run.sh
+results/

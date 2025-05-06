@@ -10,11 +10,11 @@ Built with ❤️ for users of the HAROLD RNA-seq pipeline, diffex takes the out
 
 🚀 Features
 
-✅ Accepts count matrix and sample metadata from HAROLD
-🧪 Uses edgeR and DESeq2 for robust DE testing
-📊 Produces interactive Quarto HTML reports
-🌋 Includes volcano plots, PCA, box/violin plots, and summary tables
-🔍 Easily configurable parameters via CLI or YAML
-🐳 Dockerized for reproducibility
+- ✅ Accepts count matrix and sample metadata from HAROLD
+- 🧪 Uses edgeR and DESeq2 for robust DE testing
+- 📊 Produces interactive Quarto HTML reports
+- 🌋 Includes volcano plots, PCA, box/violin plots, and summary tables
+- 🔍 Easily configurable parameters via CLI or YAML
+- 🐳 Dockerized for reproducibility
 
 ✨ Happy diffex-ing!

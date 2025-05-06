@@ -1,4 +1,4 @@
-# 🧬 diffex — Differential Expression Analysis with edgeR + Quarto
+# 🧬 diffex — Differential Expression Analysis with edgeR + DESeq2 + Quarto
 
 ![diffex logo](https://img.shields.io/badge/DE-analysis-success?style=flat-square&logo=r)
 

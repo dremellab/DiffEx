@@ -26,7 +26,7 @@ def normalize_paths(params: dict, outdir: Path) -> dict:
 
 def write_params_yaml(params: dict, outdir: Path) -> Path:
     outdir.mkdir(parents=True, exist_ok=True)
-    params_path = outdir / "params.yaml"
+    params_path = outdir / "params_sent.yaml"
     with open(params_path, "w") as f:
         yaml.safe_dump(params, f)
     print(f"📝 params.yaml written to: {params_path}")

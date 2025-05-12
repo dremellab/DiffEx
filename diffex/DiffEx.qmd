@@ -26,10 +26,10 @@ params:
   outdir: "~/Desktop/250427/results_250427"
   # normalized_counts_file: "normalized_counts.tsv"
   # deg_results_file: "deg_results.tsv"
-  log2FC_threshold: 1
+  log2FC_threshold: 1.0 # use 1.0 and not 1 .. .to make it explicitly float for wrapping python package
   pvalue_threshold: 0.05
   fdr_threshold: 0.05
-  edgeR_cpm_cutoff: 1
+  edgeR_cpm_cutoff: 1.0 # use 1.0 and not 1 .. .to make it explicitly float for wrapping python package
   edgeR_cpm_group_fraction: 0.5
   DESeq2_low_count_cutoff: 2
   DESeq2_low_count_group_fraction: 0.5
@@ -99,7 +99,7 @@ fs::dir_create(c(output_base,counts_dir, edger_deg_dir, deseq2_deg_dir))
 yaml_params <- as.list(params)
 
 # Write to YAML file
-yaml::write_yaml(yaml_params, file.path(output_base, "params.yaml"))
+yaml::write_yaml(yaml_params, file.path(output_base, "params_received.yaml"))
 ```
 
 ## Reading inputs
@@ -926,6 +926,20 @@ DT::datatable(
 # exit_gracefully()
 ```
 
+## BCV Plot
+```{r BCV_maplot}
+#| code-fold: true
+#| code-summary: "📈 edgeR BCV Plot"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+
+plotBCV(dge)
+```
+
 ## MA Plot
 
 ```{r maplot}
@@ -1352,6 +1366,36 @@ DT::datatable(deg_results_stats_df_deseq2, rownames = FALSE,
 
 ```
 
+## Dispersion Plot
+```{r deseq2_dispersionplot}
+#| code-fold: true
+#| code-summary: "📈 DESeq2 Dispersion Plot"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+
+plotDispEsts(dds, main = "Dispersion Estimates (DESeq2)")
+```
+
+## MA Plot
+```{r deseq2_maplot}
+#| code-fold: true
+#| code-summary: "📈 DESeq2 MA Plot"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+
+plotMA(res, main = "MA Plot (DESeq2)", ylim = c(-5, 5), alpha = 0.05)
+```
+
+## Volcano Plot
+
 ```{r volcano_plotly_deseq2}
 #| code-fold: true
 #| code-summary: "🌋 Interactive Volcano Plot (DESeq2)"
@@ -1374,6 +1418,8 @@ volcano_plotly
 
 
 # Combined DEG Results
+
+## Concordance table
 
 ```{r combined_results}
 #| code-fold: true
@@ -1450,6 +1496,8 @@ concordance_percent <- round(100 * matched / total, 2)
 
 cat("✅ edgeR-DESeq2 Concordance: ", concordance_percent, "%\n")
 ```
+
+## Venn Diagram
 
 ```{r Venn}
 #| code-fold: true

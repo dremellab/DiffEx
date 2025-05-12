@@ -29,8 +29,10 @@ params:
   log2FC_threshold: 1
   pvalue_threshold: 0.05
   fdr_threshold: 0.05
-  cpm_cutoff: 1
-  cpm_group_fraction: 0.5
+  edgeR_cpm_cutoff: 1
+  edgeR_cpm_group_fraction: 0.5
+  DESeq2_low_count_cutoff: 2
+  DESeq2_low_count_group_fraction: 0.5
   prerank_choice: "edgeR" # choices: "edgeR", "DESeq2", "combined"
   host: "Hs" # choices: "Hs", "Mm"
   genes_selection: "host" # choices: "host", "virus", "both" # filter out genes other than this selection
@@ -74,6 +76,8 @@ suppressPackageStartupMessages({
   library(openxlsx)
   library(yaml)
   library(fs)
+  library(VennDiagram)
+  library(grid)
 })
 
 exit_gracefully <- function() {
@@ -116,6 +120,7 @@ counts <- read.table(params$counts_file,
                      sep = "\t", 
                      header = TRUE)
 
+original_counts <- counts
 # Report original dimensions
 print(glue::glue("📊 Counts matrix loaded: ", nrow(counts), " genes (rows) × ", ncol(counts), " samples (columns)"))
 
@@ -192,14 +197,14 @@ print(glue::glue("useERCC: ", params$useERCC))
 # Filter out genes based on the genes_selection
 if (params$genes_selection == "host") {
   if (isTRUE(params$useERCC)) {
-    # Filter out viral genes
+    # Select only host and ERCC genes
     if (params$host == "Hs") {
       filtered_counts <- filtered_counts[grepl("^ENSG|^ERCC", rownames(filtered_counts)), ]
     } else if (params$host == "Mm") {
       filtered_counts <- filtered_counts[grepl("^ENSMUSG|^ERCC", rownames(filtered_counts)), ]
     }
   } else {
-    # Filter out viral genes
+    # Select only host genes
     if (params$host == "Hs") {
       filtered_counts <- filtered_counts[grepl("^ENSG", rownames(filtered_counts)), ]
     } else if (params$host == "Mm") {
@@ -213,7 +218,7 @@ if (params$genes_selection == "host") {
     # Filter out host genes .. keep ERCC
     filtered_counts <- filtered_counts[!grepl("^ENS", rownames(filtered_counts)), ]
   } else {
-    # Filter out host genes including ERCC
+    # Filter out host genes and ERCC genes
     filtered_counts <- filtered_counts[!grepl("^ERCC|^ENS", rownames(filtered_counts)), ]
   }
   nercc_genes <- nrow(filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ])
@@ -230,7 +235,33 @@ if (params$genes_selection == "host") {
 }
 # Report dimensions
 print(glue::glue("📦 Filtered counts matrix: ", nrow(filtered_counts), " genes × ", ncol(filtered_counts), " samples"))
+
+counts <- filtered_counts
+is_ercc <- grepl("^ERCC", rownames(counts))
+is_endogenous <- !is_ercc
+is_nonzero_ercc <- is_ercc & (rowSums(counts) > 0)
+samples <- selected_samples
+samples$groupName <- relevel(factor(samples[[params$group_column]], levels = c(g1, g2)),ref = g2)
 #exit_gracefully()
+if (isTRUE(params$useERCC)) {
+  print(glue::glue("❌ Warning: ",sum(is_ercc) - sum(is_nonzero_ercc), " ERCC genes have ZERO counts in all samples!."))
+
+    # Check if any ERCC genes have zero counts in all samples
+  if (sum(is_nonzero_ercc) == 0) {
+    stop("❌ All ERCC genes have zero counts in all samples. Please check your data.")
+  }
+  print(glue::glue("✅ ", sum(is_nonzero_ercc), " ERCC genes have non-zero counts in at least one sample."))
+} else {
+  # Check if any ERCC genes have zero counts in all samples
+  if (sum(is_ercc) > 0) {
+    print(glue::glue("❌ ",sum(is_ercc)," ERCC genes are present but will be removed before analysis."))
+  }
+  counts <- counts[!is_ercc, ]
+  # update
+  is_ercc <- grepl("^ERCC", rownames(counts))
+  is_endogenous <- !is_ercc
+  is_nonzero_ercc <- is_ercc & (rowSums(counts) > 0)
+}
 ```
 ## Validating group information
 
@@ -267,90 +298,103 @@ if (length(missing_groups) > 0) {
 
 ```
 
-## Setting scaling and normalization
-
-```{r normalizationcheck}
-#| code-fold: true
-#| code-summary: "🔍 Scale using ERCC"
-#| message: true
-#| warning: false
-#| 
-# ✅ Normalization method check
-
-
-if (isTRUE(params$useERCC)) {
-  ercc_genes <- grep("^ERCC", rownames(counts), value = TRUE)
-  num_ercc <- length(ercc_genes)
-  
-  if (num_ercc == 0) {
-    stop("❌ No genes starting with 'ERCC' were found in the counts matrix.")
-  } else {
-    print(glue::glue("🧪 ERCC scaling selected: Found ", num_ercc, " ERCC spike-in genes."))
-  }
-}
-
-# Identify ERCC genes
-ercc_rows <- grep("^ERCC", rownames(filtered_counts))
-if (length(ercc_rows) == 0) stop("❌ No ERCC spike-ins found in the counts matrix.")
-
-# Separate ERCC and endogenous counts
-ercc_counts <- filtered_counts[ercc_rows, ]
-endogenous_counts <- filtered_counts[-ercc_rows, ]
-
-if (isTRUE(params$useERCC)) {
-print(glue::glue(nrow(ercc_counts), " ERCC genes and ", nrow(endogenous_counts), " endogenous genes found in the counts matrix."))
-}
-# exit_gracefully()
-```
-
 
 
 # edgeR analysis
 
-## Set up DGE object
+## CPM Filtering
+
+```{r cpmfilter}
+#| code-fold: true
+#| code-summary: "🔍 CPM Filtering for edgeR"
+#| message: true
+#| warning: false
+
+dge <- DGEList(counts = counts, samples = samples, group = samples$groupName)
+
+cpm_mat <- cpm(dge, log = FALSE)
+group <- dge$samples$group
+keep_genes <- apply(cpm_mat, 1, function(row) {
+  by_group <- split(row, group)
+  group_pass <- sapply(by_group, function(vals) {
+    mean(vals > params$edgeR_cpm_cutoff) >= params$edgeR_cpm_group_fraction
+  })
+  any(group_pass)
+})
+
+nendogeneous_genes_kept <- sum(keep_genes & is_endogenous)
+# Keep ERCC genes if they are present .. no matter if they fail CPM test
+if (isTRUE(params$useERCC)) {
+  keep_genes <- keep_genes | is_nonzero_ercc
+}
+
+print(glue::glue("CPM filtering Criteria: "))
+print(glue::glue("Atleast ", params$edgeR_cpm_group_fraction * 100, "% of samples in any group must have CPM > ", params$edgeR_cpm_cutoff))
+print(glue::glue("🔍 Endogenous genes after filtering: ", nendogeneous_genes_kept))
+# print(glue::glue("🔍 Filtered out ", sum(is_endogenous) - nendogeneous_genes_kept, " endogenous genes using CPM filtering. "))
+dge_filtered <- dge[keep_genes, , keep.lib.sizes = FALSE]
+
+
+# exit_gracefully()
+```
+
+## Apply Normalization
 
 ```{r setupdge}
 #| code-fold: true
 #| code-summary: "🧬 Set up DGE object"
 #| message: true
 #| warning: false
-all_groups <- unique(selected_samples[[params$group_column]])
-other_groups <- setdiff(all_groups, g1)
-group_levels <- c(g1, sort(other_groups))  # g1 first, rest sorted (optional)
-
-group <- factor(selected_samples[[params$group_column]], levels = group_levels)
-group <- relevel(group, ref = g2)
 
 if (isTRUE(params$useERCC)) {
-  print(glue::glue("🧪 ERCC scaling/TMM normalization will be applied"))
+  message("✅ ERCC-based normalization enabled.")
+  # Re-Identify ERCC rows in current DGE object .. these will all be non-zero already
+  is_ercc <- grepl("^ERCC", rownames(dge_filtered))
 
+  # Normalize using ERCC-only library sizes
+  ercc_lib_sizes <- colSums(dge_filtered$counts[is_ercc, , drop = FALSE])
+  dge_filtered$samples$norm.factors <- ercc_lib_sizes / exp(mean(log(ercc_lib_sizes)))
 
-
-  # ERCC normalization
-  dge_ercc <- DGEList(counts = ercc_counts)
-  dge_ercc <- calcNormFactors(dge_ercc, method = "TMM")
-
-  # Apply ERCC-derived normalization factors
-  # dge <- DGEList(counts = column_to_rownames(endogenous_counts, var = "gene"), group = group)
-  dge <- DGEList(counts = endogenous_counts, group = group)
-  dge$samples$norm.factors <- dge_ercc$samples$norm.factors
-
+  # Create summary table
+  ercc_norm_df <- data.frame(
+    Sample = colnames(dge_filtered),
+    ERCC_LibSize = format(ercc_lib_sizes, big.mark = ","),
+    NormFactor = formatC(dge_filtered$samples$norm.factors, format = "f", digits = 3)
+  )
+  
+  # Remove all ERCC rows before DE analysis
+  dge_final <- dge_filtered[!is_ercc, , keep.lib.sizes = FALSE]
 } else {
-  print(glue::glue("📏 TMM normalization selected"))
-
-  dge <- DGEList(counts = column_to_rownames(endogenous_counts, var = "gene"), group = group)
-  # dge <- calcNormFactors(dge, method = "TMM")
-
+  message("ℹ️ Using TMM normalization.")
+  dge_final <- calcNormFactors(dge_filtered)
 }
-
-# add batch column to dge$samples
-if (params$batch && params$batch_column %in% colnames(samples)) {
-  dge$samples$Batch <- samples[[params$batch_column]][
-    match(rownames(dge$samples), samples[[params$sample_column]])
-  ]
+```
+```{r ercc-table, echo=FALSE}
+#| code-fold: true
+#| code-summary: "🧬 ERCC datatable"
+#| message: true
+#| warning: false
+# Only run if normalization used ERCCs
+if (isTRUE(params$useERCC)) {
+  DT::datatable(
+    ercc_norm_df,
+    caption = "📊 ERCC-Based Library Sizes and Normalization Factors",
+    options = list(pageLength = 20, autoWidth = TRUE)
+  )
 }
+```
 
-dge_samples_df <- as.data.frame(dge$samples) %>% 
+```{r normfactorplot}
+#| code-fold: true
+#| code-summary: "📊 Normalization Factor Plot"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+dge_samples_df <- as.data.frame(dge_final$samples) %>% 
   rownames_to_column(var = "Sample") %>%
   mutate(
     Group = group,
@@ -451,38 +495,7 @@ p
 # exit_gracefully()
 ```
 
-## CPM Filtering
 
-```{r cpmfilter}
-#| code-fold: true
-#| code-summary: "🔍 CPM Filtering for edgeR"
-#| message: true
-#| warning: false
-
-cpm_mat <- cpm(dge, log = FALSE)
-
-keep_genes <- apply(cpm_mat, 1, function(row) {
-  by_group <- split(row, group)
-  group_pass <- sapply(by_group, function(vals) {
-    mean(vals > params$cpm_cutoff) >= params$cpm_group_fraction
-  })
-  any(group_pass)
-})
-
-print(glue::glue("CPM filtering Criteria: "))
-print(glue::glue("Atleast ", params$cpm_group_fraction * 100, "% of samples in each group must have CPM > ", params$cpm_cutoff))
-print(glue::glue("🔍 Filtered out ", sum(!keep_genes), " genes using CPM filtering. "))
-dge_filtered <- dge[keep_genes, , keep.lib.sizes = FALSE]
-if (isTRUE(params$useERCC)) {
-  dge_filtered$samples$norm.factors <- dge_ercc$samples$norm.factors
-} else {
-  dge_filtered$samples$norm.factors <- calcNormFactors(dge_filtered, method = "TMM")
-}
-remaining <- nrow(dge_filtered)
-print(glue::glue("✅ Remaining genes for edgeR analysis: ", remaining))
-
-# exit_gracefully()
-```
 
 ## Sample Info
 
@@ -493,21 +506,30 @@ print(glue::glue("✅ Remaining genes for edgeR analysis: ", remaining))
 #| message: false
 
 # Extract sample info from dge object
-sample_info <- dge_filtered$samples %>%
+sample_info <- dge_final$samples %>%
   tibble::rownames_to_column(var = "Sample") %>%
   mutate(
     Group = group,
     LibrarySize = format(lib.size, big.mark = ","),
-    NormFactor = formatC(norm.factors, format = "f", digits = 3),
-    Batch = if ("Batch" %in% colnames(.)) Batch else NA
-  ) %>%
+    NormFactor = formatC(norm.factors, format = "f", digits = 3)
+  )
+
+if (params$batch_column %in% colnames(sample_info)) {
+  sample_info <- sample_info %>%
+    mutate(Batch = .[[params$batch_column]])
+} else {
+  sample_info <- sample_info %>%
+    mutate(Batch = NA)
+}
+
+sample_info <- sample_info %>%
   dplyr::select(Sample, Group, LibrarySize, NormFactor, Batch)
 
 
 DT::datatable(
   sample_info,
   options = list(
-    pageLength = 10,
+    pageLength = 20,
     autoWidth = TRUE,
     columnDefs = list(list(className = 'dt-center', targets = "_all"))
   ),
@@ -524,8 +546,8 @@ DT::datatable(
 #| message: true
 #| warning: false
 # Save normalized counts to a file
-normalized_counts <- cpm(dge, normalized.lib.sizes = TRUE, log = TRUE)
-as.data.frame(normalized_counts[keep_genes,]) %>%
+normalized_counts <- cpm(dge_final, normalized.lib.sizes = TRUE, log = TRUE)
+as.data.frame(normalized_counts) %>%
   rownames_to_column(var = "gene") -> normalized_counts
 normalized_counts_file <- file.path(counts_dir, "edgeR_logCPM_counts.filtered.tsv")
 write.table(normalized_counts, 
@@ -827,9 +849,9 @@ pcas$pca3d
 #| code-summary: "🧩 Design Matrix"
 
 
-selected_samples[[params$group_column]] <- relevel(factor(selected_samples[[params$group_column]]), ref = "Uninf")
+samples[[params$group_column]] <- relevel(factor(samples[[params$group_column]]), ref = "Uninf")
 # Create design matrix
-design <- model.matrix(as.formula(params$design_formula), data = selected_samples)
+design <- model.matrix(as.formula(params$design_formula), data = samples)
 # Report design matrix  dimensions
 print(glue::glue("📊 Design matrix dimensions: ", nrow(design), " samples × ", ncol(design), " variables"))
 # Check for singularities
@@ -838,7 +860,7 @@ if (any(is.na(design))) {
 }
 
 # Estimate dispersion
-dge <- estimateDisp(dge_filtered, design)
+dge <- estimateDisp(dge_final, design)
 
 # Fit GLM and run LRT
 fit <- glmFit(dge, design)
@@ -977,11 +999,11 @@ volcano_plotly
 
 # DESeq2 analysis
 
-## Set up DESeq2 object
+## Low-count filtering
 
-```{r setupdeseq2}
+```{r lowcountfiltering}
 #| code-fold: true
-#| code-summary: "🧬 Set up DESeq2 object"
+#| code-summary: "🧬 Low count filtering"
 #| message: true
 #| warning: false
 #| echo: false
@@ -990,25 +1012,63 @@ volcano_plotly
 # colnames(selected_samples)[colnames(selected_samples) == params$sample_column] <- "sample"
 # colnames(selected_samples)[colnames(selected_samples) == params$group_column] <- "group"
 
-if ("batch" %in% colnames(selected_samples)) {
-  colnames(selected_samples)[colnames(selected_samples) == params$batch_column] <- "batch"
+# Apply DESeq2 low count filtering using params$DESeq2_low_count_cutoff and params$DESeq2_low_count_fraction
+# Use endogenous counts for filtering
+# A minimum of DESeq2_low_count_fraction fraction of samples from either group g1 or g2 should have counts > DESeq2_low_count_cutoff
+
+# get original filtered counts
+counts <- filtered_counts
+is_ercc <- grepl("^ERCC", rownames(counts))
+is_endogenous <- !is_ercc
+is_nonzero_ercc <- is_ercc & (rowSums(counts) > 0)
+
+group <- samples[[params$group_column]]
+
+keep_genes_deseq2 <- apply(counts, 1, function(row) {
+  by_group <- split(row, group)
+  group_pass <- sapply(by_group, function(vals) {
+    mean(vals > params$DESeq2_low_count_cutoff) >= params$DESeq2_low_count_group_fraction
+  })
+  any(group_pass)
+})
+
+if (isTRUE(params$useERCC)) {
+  keep_genes_deseq2 <- keep_genes_deseq2 | is_nonzero_ercc
 }
+
+nendogeneous_genes_kept <- sum(keep_genes_deseq2 & is_endogenous)
+nercc_genes_kept <- sum(keep_genes_deseq2 & is_nonzero_ercc)
+print(glue::glue("Low-count filtering Criteria: "))
+print(glue::glue("Atleast ", params$DESeq2_low_count_group_fraction * 100, "% of samples in any group must have count > ", params$DESeq2_low_count_cutoff))
+print(glue::glue("✅ Endogenous genes after filtering: ", nendogeneous_genes_kept))
+# if (isTRUE(params$useERCC)) {
+# print(glue::glue("✅ ERCC genes after filtering low count genes for DESeq2 analysis: ", nercc_genes_kept))
+# }
+```
+
+```{r deseq2_normalization}
+#| code-fold: true
+#| code-summary: "🧬 DESEq2 Normalization"
+#| message: true
+#| warning: false
+#| echo: false
+
+design_formula <- as.formula(params$design_formula)
+dds <- DESeqDataSetFromMatrix(countData = counts[keep_genes_deseq2, ], 
+                              colData = samples, 
+                              design = design_formula)
 
 if (isTRUE(params$useERCC)) {
   print(glue("🧪 ERCC scaling will be applied"))
+  
+  ercc_rows <- grepl("^ERCC", rownames(dds))
+  # Estimate size factors using ERCC-only rows
+  dds <- estimateSizeFactors(dds, controlGenes = ercc_rows)
 
-  # Create DESeqDataSet for ERCC and calculate size factors
-  dds_ercc <- DESeqDataSetFromMatrix(countData = ercc_counts, colData = selected_samples, design = ~1)
-  dds_ercc <- estimateSizeFactors(dds_ercc)
-
-  # Create DESeqDataSet for endogenous counts
-  dds <- DESeqDataSetFromMatrix(countData = endogenous_counts, colData = selected_samples, design = ~groupName)
-
-  # Apply ERCC-derived size factors
-  sizeFactors(dds) <- sizeFactors(dds_ercc)
+  # Remove ERCC rows from dds after normalization
+  dds <- dds[!ercc_rows, ]
 } else {
   print(glue("📏 Default DESeq2 size factor normalization"))
-  dds <- DESeqDataSetFromMatrix(countData = endogenous_counts, colData = selected_samples, design = ~groupName)
   dds <- estimateSizeFactors(dds)
 }
 
@@ -1129,7 +1189,7 @@ sample_info_deseq2 <- as.data.frame(colData(dds)) %>%
 DT::datatable(
   sample_info_deseq2,
   options = list(
-    pageLength = 10,
+    pageLength = 20,
     autoWidth = TRUE,
     columnDefs = list(list(className = 'dt-center', targets = "_all"))
   ),
@@ -1391,9 +1451,49 @@ concordance_percent <- round(100 * matched / total, 2)
 cat("✅ edgeR-DESeq2 Concordance: ", concordance_percent, "%\n")
 ```
 
+```{r Venn}
+#| code-fold: true
+#| code-summary: "🧬 Venn Diagram of DEGs"
+#| fig.width: 8
+#| fig.height: 8
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| warning: false
 
-```{r exit}
-exit_gracefully()
-print(glue::glue(" Exiting early: Debugging script intentionally halted."))
+# Create sets
+edgeR_up <- combined_results %>% filter(Direction_edgeR == "Up") %>% pull(gene)
+edgeR_down <- combined_results %>% filter(Direction_edgeR == "Down") %>% pull(gene)
+deseq2_up <- combined_results %>% filter(Direction_DESeq2 == "Up") %>% pull(gene)
+deseq2_down <- combined_results %>% filter(Direction_DESeq2 == "Down") %>% pull(gene)
+
+# Generate Venn diagram
+venn.plot <- draw.quad.venn(
+  area1 = length(edgeR_up),
+  area2 = length(edgeR_down),
+  area3 = length(deseq2_up),
+  area4 = length(deseq2_down),
+  n12 = length(intersect(edgeR_up, edgeR_down)),
+  n13 = length(intersect(edgeR_up, deseq2_up)),
+  n14 = length(intersect(edgeR_up, deseq2_down)),
+  n23 = length(intersect(edgeR_down, deseq2_up)),
+  n24 = length(intersect(edgeR_down, deseq2_down)),
+  n34 = length(intersect(deseq2_up, deseq2_down)),
+  n123 = length(Reduce(intersect, list(edgeR_up, edgeR_down, deseq2_up))),
+  n124 = length(Reduce(intersect, list(edgeR_up, edgeR_down, deseq2_down))),
+  n134 = length(Reduce(intersect, list(edgeR_up, deseq2_up, deseq2_down))),
+  n234 = length(Reduce(intersect, list(edgeR_down, deseq2_up, deseq2_down))),
+  n1234 = length(Reduce(intersect, list(edgeR_up, edgeR_down, deseq2_up, deseq2_down))),
+  category = c("edgeR Up", "edgeR Down", "DESeq2 Up", "DESeq2 Down"),
+  fill = c("tomato", "skyblue", "lightgreen", "orange"),
+  cex = 1.2,
+  cat.cex = 1.2
+)
+grid.draw(venn.plot)
 ```
+
+<!-- ```{r exit} -->
+<!-- exit_gracefully() -->
+<!-- print(glue::glue(" Exiting early: Debugging script intentionally halted.")) -->
+<!-- ``` -->
 

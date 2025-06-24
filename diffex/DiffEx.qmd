@@ -25,7 +25,9 @@ params:
   # batch: TRUE
   # batch_column: "batch"
   # design_formula: "~ groupName"
-  # outdir: "~/Desktop/250424/results_250424"
+  # outdir: "~/Desktop/250424/results_250620"
+  # host: "Hs" # choices: "Hs", "Mm"
+  # genes_selection: "host" # choices: "host", "virus", "both" # filter out genes other than this selection
   # test dataset 1
   counts_file: "~/Documents/Data/Analysis/20250423_RNAseq-1/counts/counts_matrix.tsv"
   samplesheet: "~/Documents/Data/Analysis/20250423_RNAseq-1/counts/samples.tsv"
@@ -39,6 +41,8 @@ params:
   batch_column: "batch"
   design_formula: "~ groupName"
   outdir: "~/Documents/Data/Analysis/20250423_RNAseq-1/DiffEx_results"
+  host: "Mm" # choices: "Hs", "Mm"
+  genes_selection: "host" # choices: "host", "virus", "both" # filter out genes other than this selection
   # normalized_counts_file: "normalized_counts.tsv"
   # deg_results_file: "deg_results.tsv"
   log2FC_threshold: 1.0 # use 1.0 and not 1 .. .to make it explicitly float for wrapping python package
@@ -48,9 +52,8 @@ params:
   edgeR_cpm_group_fraction: 0.5
   DESeq2_low_count_cutoff: 2
   DESeq2_low_count_group_fraction: 0.5
-  prerank_choice: "edgeR" # choices: "edgeR", "DESeq2", "combined"
-  host: "Hs" # choices: "Hs", "Mm"
-  genes_selection: "host" # choices: "host", "virus", "both" # filter out genes other than this selection
+  # prerank_choice: "edgeR" # choices: "edgeR", "DESeq2", "combined"
+
 ---
 
 # 🔬 Differential Expression Analysis
@@ -491,7 +494,11 @@ violin_data <- violin_data %>%
 
 violin_data$group <- selected_samples[[params$group_column]][match(violin_data$sample, selected_samples[[params$sample_column]])]
 violin_data$group <- factor(violin_data$group, levels = c(g1, g2))
-violin_data$sample <- factor(violin_data$sample, levels = unique(violin_data$sample))
+violin_data$sample <- factor(violin_data$sample, 
+  levels = violin_data %>%
+    distinct(sample, group) %>%
+    arrange(group, sample) %>%
+    pull(sample))
 violin_data$normalized_counts <- as.numeric(violin_data$normalized_counts)
 violin_data <- violin_data %>% filter(normalized_counts > 0)
 
@@ -695,13 +702,31 @@ volcano_plotly <- plot_ly(
 return(volcano_plotly)
 }
 
+add_gsea_rank_score <- function(df) {
+  # Calculate sign of log2FoldChange
+  sign_lfc <- sign(df$log2FoldChange)
+  
+  # Compute -log10(p_value)
+  logp <- -log10(df$p_value)
+  
+  # Combine into GSEA ranking score
+  df$gsea_rank_score <- sign_lfc * logp
+  
+  # Sort by gsea_rank_score from low to high
+  df <- df[order(df$gsea_rank_score), ]
+  
+  return(df)
+}
+
+
+
 ```
 
 
 
 # limma analysis
 
-## Normalization
+## Filtering and Normalization
 
 ```{r limma}
 #| code-fold: true
@@ -714,7 +739,6 @@ if (isTRUE(params$useERCC)) {
   
   print(glue::glue("✅ ERCC standard curve slope - based normalization enabled."))
   dims <- dim(pseudo_log2_normalized_counts)
-  print(glue::glue("📊 log2 normalized pseudo RPKM counts matrix dimensions: {dims[1]} genes × {dims[2]} samples"))
   # Use pseudo_log2_normalized_counts for limma analysis
   limma_design <- as.formula(sub("~\\s*", "~ 0 + ", params$design_formula))
   limma_model_matrix <- model.matrix(limma_design, data = samples)
@@ -730,13 +754,62 @@ if (isTRUE(params$useERCC)) {
   
   # Top DE genes for KOS vs Uninf
   top_genes <- topTable(fit2, number = Inf)
+## no ERCCs
+} else {
+  print(glue::glue("✅ Using Limma-voom for normalization."))
+  group <- factor(samples$groupName, levels = c(g2, g1))  # g2 is reference level
+  dge <- DGEList(counts = counts, group = group)
+  keep <- filterByExpr(dge, group = group)
+  dge <- dge[keep,, keep.lib.sizes = FALSE]
+  dge <- calcNormFactors(dge)
+  
+  limma_design <- model.matrix(~ 0 + group, data = samples)
+  colnames(limma_design) <- levels(samples$groupName)
+  # voom_plot <- NULL
+  v <- voom(dge, limma_design, plot = TRUE)  # suppress direct plot
+  
+  log2_raw_cpm <- as.data.frame(cpm(dge, log = TRUE, prior.count = 1))
+  log2_normalized_counts_limma <- as.data.frame(v$E)
+  dims <- dim(log2_normalized_counts_limma)
+  # voom_plot <- plot(v$voom.xy$x, v$voom.xy$y, pch = 20, main = "Voom: Mean-Variance Trend",
+                    # xlab = "log2(CPM)", ylab = "√(standard deviation)")
+  fit <- lmFit(v, limma_design)
+  contrast_str <- paste0(params$group1, " - ", params$group2)
+  contrast_matrix <- makeContrasts(contrasts = contrast_str, levels = limma_design)
+  fit2 <- contrasts.fit(fit, contrast_matrix)
+  fit2 <- eBayes(fit2)
+  top_genes <- topTable(fit2, number = Inf)
 }
-## TODO 
-# } else {
-#   # Use log2CPM counts for limma analysis
-#   limma_design = as.formula(params$design_formula)
-# }
 
+```
+
+## Sample Info
+
+```{r limma_normfactor_table, echo=FALSE}
+#| code-fold: true
+#| code-summary: "🧬 datatable"
+#| message: true
+#| warning: false
+# Only run if normalization used ERCCs
+
+if (isTRUE(params$useERCC)) {
+  print(glue::glue("📊 log2 normalized pseudo RPKM counts matrix dimensions: {dims[1]} genes × {dims[2]} samples"))
+} else {
+  print(glue::glue("📊 log2 normalized counts matrix dimensions post filterByExpr: {dims[1]} genes × {dims[2]} samples"))
+  DT::datatable(
+    as.data.frame(dge$samples) %>%
+      rownames_to_column(var = "Sample") %>%
+      mutate(
+        Group = group,
+        LibrarySize = lib.size,
+        NormFactor = signif(norm.factors, 3)
+      ) %>%
+      dplyr::select(Sample, Group, LibrarySize, NormFactor),
+    caption = "📊 Library Sizes and Normalization Factors",
+    rownames = FALSE,
+    options = list(pageLength = 20, autoWidth = TRUE)
+  )
+}
 ```
 
 ```{r save_limma_normalized_counts}
@@ -744,10 +817,14 @@ if (isTRUE(params$useERCC)) {
 #| code-summary: "💾 Save Normalized Counts"
 #| message: true
 #| warning: false
-# Save normalized counts to a file
+
+
+if (isTRUE(params$useERCC)) {
+normalized_counts_file <- file.path(counts_dir, "limma_log2normalized_pseudo_rpkm_counts.tsv")
+
+  # Save normalized counts to a file
 as.data.frame(pseudo_log2_normalized_counts) %>%
   rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_for_output
-normalized_counts_file <- file.path(counts_dir, "limma_log2normalized_pseudo_rpkm_counts.tsv")
 write.table(pseudo_log2_normalized_counts_for_output,
             file = normalized_counts_file,
             sep = "\t",
@@ -767,9 +844,23 @@ write.table(pseudo_rpkm_counts_for_output,
             quote = FALSE,
             col.names = TRUE,
             row.names = FALSE)
+} else {
+normalized_counts_file <- file.path(counts_dir, "limma_voom_normalized_counts.tsv")
+
+as.data.frame(log2_normalized_counts_limma) %>%
+  rownames_to_column(var = "gene") -> log2_normalized_counts_limma_for_output
+write.table(log2_normalized_counts_limma_for_output,
+            file = normalized_counts_file,
+            sep = "\t",
+            quote = FALSE,
+            col.names = TRUE,
+            row.names = FALSE)
+print(glue::glue("💾 Normalized counts saved to: ", normalized_counts_file))
+  
+}
 # exit_gracefully()
 ```
-## Count Distribution plot
+## Counts Distribution
 
 ::: {.panel-tabset}
 
@@ -783,12 +874,20 @@ write.table(pseudo_rpkm_counts_for_output,
 #| out.height: "100%"
 #| fig.align: "center"
 
+if (isTRUE(params$useERCC)) {
   log2_rpkm_counts_for_plots <- log2_rpkm_counts[!apply(log2_rpkm_counts, 1, function(x) any(is.na(x) | is.infinite(x))), ]
 as.data.frame(log2_rpkm_counts_for_plots) %>% rownames_to_column(var = "gene") -> log2_rpkm_counts_for_plots
   violin_plot <- make_violin_plot(log2_rpkm_counts_for_plots,
                                    xlab = "Sample",
                                    ylab = "Log2 RPKM Raw Counts",
                                    title = "")
+} else {
+  log2_raw_cpm %>% rownames_to_column(var = "gene") -> log2_raw_cpm_for_plots
+  violin_plot <- make_violin_plot(log2_raw_cpm_for_plots,
+                                   xlab = "Sample",
+                                   ylab = "Log2 Raw CPM Counts",
+                                   title = "")
+}
 violin_plot
 ```
 ### After normalization
@@ -801,17 +900,20 @@ violin_plot
 #| out.height: "100%"
 #| fig.align: "center"
 
-pseudo_log2_normalized_counts_for_plots <- pseudo_log2_normalized_counts[!apply(pseudo_log2_normalized_counts, 1, function(x) any(is.na(x) | is.infinite(x))), ]
 
 # Create violin plot of normalized counts
 if (isTRUE(params$useERCC)) {
+  pseudo_log2_normalized_counts_for_plots <- pseudo_log2_normalized_counts[!apply(pseudo_log2_normalized_counts, 1, function(x) any(is.na(x) | is.infinite(x))), ]
   violin_plot <- make_violin_plot(pseudo_log2_normalized_counts_for_plots,
                                    xlab = "Sample",
                                    ylab = "Log2 Normalized Pseudo RPKM Counts",
                                    title = "")
 } else {
-  # TODO
-  pass
+  log2_normalized_counts_limma %>% rownames_to_column(var = "gene") -> log2_normalized_counts_limma_for_plots
+  violin_plot <- make_violin_plot(log2_normalized_counts_limma_for_plots,
+                                   xlab = "Sample",
+                                   ylab = "Log2 Normalized Counts",
+                                   title = "")
 }
 violin_plot
 ```
@@ -834,8 +936,14 @@ violin_plot
 #| fig.show: "hold"
 #| warning: false
 
-pcas_before <- make_pca_plots(log2_rpkm_counts_for_plots,
+if (isTRUE(params$useERCC)) {
+  pcas_before <- make_pca_plots(log2_rpkm_counts_for_plots,
                                title = "PCA Plot of Log2 RPKM Counts")
+} else {
+pcas_before <- make_pca_plots(log2_raw_cpm_for_plots,
+                               title = "PCA Plot of Log2 Raw CPM Counts")
+}
+
 pcas_before$pca2d
 
 # exit_gracefully()
@@ -854,11 +962,14 @@ pcas_before$pca2d
 #| fig.align: "center"
 #| fig.show: "hold"
 #| warning: false
-
-pcas_after <- make_pca_plots(pseudo_log2_normalized_counts_for_plots,
+if (isTRUE(params$useERCC)) {
+  pcas_after <- make_pca_plots(pseudo_log2_normalized_counts_for_plots,
                                title = "PCA Plot of Log2 Normalized Pseudo RPKM Counts")
+} else {
+pcas_after <- make_pca_plots(log2_normalized_counts_limma_for_plots,
+                               title = "PCA Plot of voom Normalized Counts")
+}
 pcas_after$pca2d
-
 ```
 
 :::
@@ -916,6 +1027,8 @@ pcas_after$pca3d
 #| warning: false
 #| echo: false
 
+if (isTRUE(params$useERCC)) {
+
 pseudo_log2_normalized_counts <- 
     pseudo_log2_normalized_counts %>%
     as.data.frame() %>%
@@ -923,6 +1036,8 @@ pseudo_log2_normalized_counts <-
 
 # Add average log2 expression per gene
 top_genes$AveExpr <- rowMeans(pseudo_log2_normalized_counts[rownames(top_genes), , drop = FALSE])
+
+}
 
 # Categorize gene regulation direction
 top_genes$Direction <- dplyr::case_when(
@@ -945,7 +1060,8 @@ res_table_limma <- top_genes %>%
   )
 
 res_table_limma <- res_table_limma %>%
-  dplyr::select(gene, log2FoldChange, FoldChange, AveExpr, p_value, FDR, Direction)
+  dplyr::select(gene, log2FoldChange, FoldChange, AveExpr, p_value, FDR, Direction) %>% 
+  add_gsea_rank_score()
 
 # Summary table
 limma_deg_results_stats_df <- as.data.frame(table(top_genes$Direction))
@@ -1021,10 +1137,10 @@ if (isTRUE(params$useERCC)) {
   ready_for_deg_raw_counts <- round(pseudo_rpkm_counts)
 }
 
-dge <- DGEList(counts = ready_for_deg_raw_counts, samples = samples, group = samples$groupName)
+dge_edger <- DGEList(counts = ready_for_deg_raw_counts, samples = samples, group = samples$groupName)
 
-cpm_mat <- cpm(dge, log = FALSE)
-group <- dge$samples$group
+cpm_mat <- cpm(dge_edger, log = FALSE)
+group <- dge_edger$samples$group
 keep_genes <- apply(cpm_mat, 1, function(row) {
   by_group <- split(row, group)
   group_pass <- sapply(by_group, function(vals) {
@@ -1033,7 +1149,7 @@ keep_genes <- apply(cpm_mat, 1, function(row) {
   any(group_pass)
 })
 
-dge_filtered <- dge[keep_genes, , keep.lib.sizes = FALSE]
+dge_filtered <- dge_edger[keep_genes, , keep.lib.sizes = FALSE]
 
 ercc_genes_kept <- grepl("^ERCC",rownames(dge_filtered))
 nercc_genes_kept <- sum(ercc_genes_kept)
@@ -1049,7 +1165,7 @@ print(glue::glue("🔍 ERCC genes after filtering: ", nercc_genes_kept))
 
 ## Apply Normalization
 
-```{r setupdge}
+```{r setup_edger}
 #| code-fold: true
 #| code-summary: "🧬 Set up DGE object"
 #| message: true
@@ -1062,11 +1178,11 @@ if (isTRUE(params$useERCC)) {
   print(glue::glue("✅ Using ERCC-normalized pseudo RPKM counts from limma analysis."))
   dge_final$samples$norm.factors <- rep(1, ncol(dge_final))
 } else {
-  message("ℹ️ Using TMM normalization.")
+  print(glue::glue("ℹ️ Using TMM normalization."))
 }
 ```
 
-```{r normfactor table, echo=FALSE}
+```{r edger_normfactor_table, echo=FALSE}
 #| code-fold: true
 #| code-summary: "🧬 ERCC datatable"
 #| message: true
@@ -1247,7 +1363,7 @@ if (isTRUE(params$useERCC)) {
 
 <!-- ``` -->
 
-```{r save_normalized_counts}
+```{r edger_save_normalized_counts}
 #| code-fold: true
 #| code-summary: "💾 Save Normalized Counts"
 #| message: true
@@ -1256,7 +1372,7 @@ if (isTRUE(params$useERCC)) {
 normalized_counts <- cpm(dge_final, normalized.lib.sizes = TRUE, log = TRUE)
 as.data.frame(normalized_counts) %>%
   rownames_to_column(var = "gene") -> normalized_counts_for_output
-normalized_counts_file <- file.path(counts_dir, "edgeR_logCPM_counts.tsv")
+normalized_counts_file <- file.path(counts_dir, "edgeR_TMM_normalized_logCPM_counts.tsv")
 write.table(normalized_counts_for_output,
             file = normalized_counts_file,
             sep = "\t",
@@ -1267,8 +1383,7 @@ print(glue::glue("💾 Normalized counts saved to: ", normalized_counts_file))
 # exit_gracefully()
 ```
 
-<!-- <!-- # 📊 Data Visualization --> -->
-## Count Distribution plot
+## Counts Distribution
 
 ::: {.panel-tabset}
 
@@ -1417,7 +1532,7 @@ pcas_after$pca3d
 
 ## DEG results
 
-```{r design_deseq2}
+```{r deg_results_edger}
 #| code-fold: true
 #| code-summary: "🧩 Design Matrix"
 
@@ -1433,17 +1548,17 @@ if (any(is.na(design))) {
 }
 
 # Estimate dispersion
-dge <- estimateDisp(dge_final, design)
+dge_edger <- estimateDisp(dge_final, design)
 
 # Fit GLM and run LRT
-fit <- glmFit(dge, design)
+fit <- glmFit(dge_edger, design)
 lrt <- glmLRT(fit)
 
 # Extract results table
 res_table_edger <- topTags(lrt, n = Inf)$table
 
 # Add average logCPM expression (from the DGE object)
-res_table_edger$AveExpr <- rowMeans(cpm(dge, log = TRUE))
+res_table_edger$AveExpr <- rowMeans(cpm(dge_edger, log = TRUE))
 
 # Categorize gene regulation direction
 res_table_edger$Direction <- dplyr::case_when(
@@ -1469,7 +1584,8 @@ if (!"gene" %in% colnames(res_table_edger)) {
 
 # Select and order columns
 res_table_edger <- res_table_edger %>%
-  dplyr::select(gene, log2FoldChange, FoldChange, logCPM, LR, p_value, FDR, AveExpr, Direction)
+  dplyr::select(gene, log2FoldChange, FoldChange, logCPM, LR, p_value, FDR, AveExpr, Direction) %>%
+  add_gsea_rank_score()
 
 
 # Create summary table
@@ -1520,7 +1636,7 @@ DT::datatable(
 #| fig.align: "center"
 #| fig.show: "hold"
 
-plotBCV(dge)
+plotBCV(dge_edger)
 ```
 
 ## MA Plot
@@ -1598,7 +1714,7 @@ volcano_plotly
 
 ## Low-count filtering
 
-```{r lowcountfiltering}
+```{r deseq2_lowcountfiltering}
 #| code-fold: true
 #| code-summary: "🧬 Low count filtering"
 #| message: true
@@ -1608,17 +1724,16 @@ volcano_plotly
 
 # get original filtered counts
 if (isTRUE(params$useERCC)) {
-  filtered_counts <- round(pseudo_rpkm_counts)
+  ready_for_deg_raw_counts <- round(pseudo_rpkm_counts)
 } 
-counts <- filtered_counts
 
-is_ercc <- grepl("^ERCC", rownames(counts))
+is_ercc <- grepl("^ERCC", rownames(ready_for_deg_raw_counts))
 is_endogenous <- !is_ercc
-is_nonzero_ercc <- is_ercc & (rowSums(counts) > 0)
+is_nonzero_ercc <- is_ercc & (rowSums(ready_for_deg_raw_counts) > 0)
 
 group <- samples[[params$group_column]]
 
-keep_genes_deseq2 <- apply(counts, 1, function(row) {
+keep_genes_deseq2 <- apply(ready_for_deg_raw_counts, 1, function(row) {
   by_group <- split(row, group)
   group_pass <- sapply(by_group, function(vals) {
     mean(vals > params$DESeq2_low_count_cutoff) >= params$DESeq2_low_count_group_fraction
@@ -1640,6 +1755,8 @@ print(glue::glue("✅ Endogenous genes after filtering: ", nendogeneous_genes_ke
 # }
 ```
 
+## Normalization
+
 ```{r deseq2_normalization}
 #| code-fold: true
 #| code-summary: "🧬 DESEq2 Normalization"
@@ -1648,7 +1765,7 @@ print(glue::glue("✅ Endogenous genes after filtering: ", nendogeneous_genes_ke
 #| echo: false
 
 design_formula <- as.formula(params$design_formula)
-dds <- DESeqDataSetFromMatrix(countData = counts[keep_genes_deseq2, ], 
+dds <- DESeqDataSetFromMatrix(countData = ready_for_deg_raw_counts[keep_genes_deseq2, ], 
                               colData = samples, 
                               design = design_formula)
 
@@ -1754,6 +1871,8 @@ p
 
 ```
 
+## Sample Info
+
 ```{r deseq2_sampleinfo}
 #| code-fold: true
 #| code-summary: "📋 DESeq2 Sample Metadata with Library Sizes and Norm Factors"
@@ -1817,7 +1936,7 @@ print(glue::glue("💾 DESeq2 normalized counts saved to: {normalized_counts_des
 
 ```
 
-## Normalized counts Distribution plot
+## Counts Distribution
 
 :::{.panel-tabset}
 
@@ -1988,21 +2107,9 @@ contrast_vector <- c(design_variable, g1, g2)
 res <- results(dds, contrast = contrast_vector)
 # Add gene names
 res$gene <- rownames(res)
-# Save DESeq2 results to a file
-res_file <- file.path(deseq2_deg_dir, "DESeq2_results.tsv")
-write.table(res, 
-            file = res_file, 
-            sep = "\t", 
-            quote = FALSE, 
-            col.names = TRUE, 
-            row.names = TRUE)
-print(glue::glue("💾 DESeq2 results saved to: ", res_file))
 
 # Assume 'res' is your DESeq2 results object
 res_table_deseq2 <- as.data.frame(res)
-
-# Add gene IDs as a column (if rownames are gene IDs)
-res_table_deseq2$gene <- rownames(res_table_deseq2)
 
 # Categorize gene direction
 res_table_deseq2$Direction <- case_when(
@@ -2020,7 +2127,18 @@ res_table_deseq2 <- res_table_deseq2 %>%
   dplyr::mutate(
     FoldChange = 2^log2FoldChange
   ) %>%
-  dplyr::select(gene, log2FoldChange, FoldChange, baseMean, p_value, FDR, Direction)
+  dplyr::select(gene, log2FoldChange, FoldChange, baseMean, p_value, FDR, Direction) %>%
+  add_gsea_rank_score()
+
+# Save DESeq2 results to a file
+res_file <- file.path(deseq2_deg_dir, "DESeq2_results.tsv")
+write.table(res_table_deseq2, 
+            file = res_file, 
+            sep = "\t", 
+            quote = FALSE, 
+            col.names = TRUE, 
+            row.names = TRUE)
+print(glue::glue("💾 DESeq2 results saved to: ", res_file))
 
 
 # Create summary stats table
@@ -2109,31 +2227,38 @@ volcano_plotly
 #| warning: false
 #| echo: false
 
+as.data.frame(counts_data) %>% rownames_to_column(var = "gene") -> counts_data
+gene_annotations <- counts_data %>%
+  dplyr::select(gene, species, gene_chr, gene_start, gene_end,
+         gene_strand, gene_length_kb, gene_type)
+
 res_table_limma <- res_table_limma %>%
-  dplyr::select(gene, log2FoldChange, FoldChange, p_value, FDR, Direction)
+  dplyr::select(gene, log2FoldChange, FoldChange, p_value, FDR, Direction, gsea_rank_score)
 
 res_table_edger <- res_table_edger %>%
-  dplyr::select(gene, log2FoldChange, FoldChange, p_value, FDR, Direction)
+  dplyr::select(gene, log2FoldChange, FoldChange, p_value, FDR, Direction, gsea_rank_score)
 
 res_table_deseq2 <- res_table_deseq2 %>%
-  dplyr::select(gene, log2FoldChange, FoldChange, p_value, FDR, Direction)
+  dplyr::select(gene, log2FoldChange, FoldChange, p_value, FDR, Direction, gsea_rank_score)
 
 # Combine edgeR, DESeq2, and limma DEG results by gene
 combined_results <- res_table_edger %>%
-  dplyr::select(gene, log2FoldChange, FoldChange, p_value, FDR, Direction) %>%
   dplyr::rename_with(~ paste0(.x, "_edgeR"), -gene) %>%
   dplyr::full_join(
     res_table_deseq2 %>%
-      dplyr::select(gene, log2FoldChange, FoldChange, p_value, FDR, Direction) %>%
       dplyr::rename_with(~ paste0(.x, "_DESeq2"), -gene),
     by = "gene"
   ) %>%
   dplyr::full_join(
     res_table_limma %>%
-      dplyr::select(gene, log2FoldChange, FoldChange, p_value, FDR, Direction) %>%
       dplyr::rename_with(~ paste0(.x, "_limma"), -gene),
     by = "gene"
   )
+
+# Join with combined_results on 'gene'
+combined_results <- combined_results %>%
+  left_join(gene_annotations, by = "gene") %>%
+  relocate(any_of(names(gene_annotations)), .before = everything())
 
 # Replace empty strings with NA (for safety)
 combined_results[combined_results == ""] <- NA

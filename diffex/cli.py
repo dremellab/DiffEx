@@ -26,7 +26,7 @@ def normalize_paths(params: dict, outdir: Path) -> dict:
 
 def write_params_yaml(params: dict, outdir: Path) -> Path:
     outdir.mkdir(parents=True, exist_ok=True)
-    params_path = outdir / "params.yaml"
+    params_path = outdir / "params_sent.yaml"
     with open(params_path, "w") as f:
         yaml.safe_dump(params, f)
     print(f"📝 params.yaml written to: {params_path}")
@@ -81,12 +81,13 @@ def build_dynamic_render_command():
         """Run DEG analysis and generate Quarto report."""
         outdir = kwargs.get("outdir", "results")
         outdir_path = Path(outdir)
+        outdir_path = outdir_path.resolve()
 
         final_params = {
             key: kwargs.get(key, default)
             for key, default in param_defaults.items()
         }
-        final_params["outdir"] = outdir  # Add outdir explicitly to params
+        final_params["outdir"] = str(outdir_path)  # Add outdir explicitly to params
 
         params_path = write_params_yaml(final_params, outdir_path)
 
@@ -110,12 +111,15 @@ def build_dynamic_render_command():
         if key == "outdir":
             continue  # prevent duplicate
         param_type = type(default)
+        default_value = default
+        if key == "counts_file" or key == "samplesheet":
+            default_value = str(Path(default_value).expanduser().resolve())
         parameters.append(
             Parameter(
                 name=key,
                 kind=Parameter.KEYWORD_ONLY,
                 default=typer.Option(
-                    default,
+                    default_value,
                     help=f"Quarto param: `{key}`",
                     show_default=True
                 ),

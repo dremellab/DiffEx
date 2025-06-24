@@ -1,6 +1,6 @@
 # dev version
 
-# v0.2.0
+# v0.2.x
 
 ## Highlights
 

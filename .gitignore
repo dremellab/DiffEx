@@ -15,3 +15,6 @@ diffex/DiffEx_cache/
 diffex/DiffEx_files/
 diffex/run.sh
 results*/
+renv/library/
+renv/python/
+renv/staging/

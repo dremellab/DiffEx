@@ -81,7 +81,7 @@ def build_dynamic_render_command():
         """Run DEG analysis and generate Quarto report."""
         outdir = kwargs.get("outdir", "results")
         outdir_path = Path(outdir)
-        outdir_path = outdir_path.resolve()
+        outdir_path = outdir_path.expanduser().resolve()
 
         final_params = {
             key: kwargs.get(key, default)

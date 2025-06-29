@@ -1,0 +1,17 @@
+name: diffex-env
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - uv
+
+# After activating this environment, run:
+#   uv venv .venv
+#   source .venv/bin/activate
+#   uv pip install -r uv.lock
+#   R and quarto needs to be previously installed
+#   Rscript -e "renv::restore()"

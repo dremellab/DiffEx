@@ -14,45 +14,41 @@ params:
   # counts_file: ".test/counts_matrix.tsv"
   # samplesheet: ".test/samples.tsv"
   # test dataset 2
-  # counts_file: "~/Desktop/250424/counts_matrix.tsv"
-  # samplesheet: "~/Desktop/250424/samples.tsv"
-  # useERCC: TRUE
-  # ercc_mix: 1 # choices: 1, 2
-  # group1: "KOS"
-  # group2: "Uninf"
-  # sample_column: "sampleName"
-  # group_column: "groupName"
-  # batch: TRUE
-  # batch_column: "batch"
-  # design_formula: "~ groupName"
-  # outdir: "~/Desktop/250424/results_250620"
-  # host: "Hs" # choices: "Hs", "Mm"
-  # genes_selection: "host" # choices: "host", "virus", "both" # filter out genes other than this selection
-  # test dataset 1
-  counts_file: "~/Documents/Data/Analysis/20250423_RNAseq-1/counts/counts_matrix.tsv"
-  samplesheet: "~/Documents/Data/Analysis/20250423_RNAseq-1/counts/samples.tsv"
-  useERCC: FALSE
+  counts_file: "~/Documents/Data/Analysis/20250423_RNAseq-2/counts/counts_matrix.tsv"
+  samplesheet: "~/Documents/Data/Analysis/20250423_RNAseq-2/counts/samples.tsv"
+  useERCC: TRUE
   ercc_mix: 1 # choices: 1, 2
-  group1: "GFP48h"
-  group2: "UT"
+  group1: "KOS"
+  group2: "Uninf"
   sample_column: "sampleName"
   group_column: "groupName"
-  batch: TRUE
+  usebatch: TRUE
   batch_column: "batch"
-  design_formula: "~ groupName"
-  outdir: "~/Documents/Data/Analysis/20250423_RNAseq-1/DiffEx_results"
-  host: "Mm" # choices: "Hs", "Mm"
+  outdir: "~/Documents/Data/Analysis/20250423_RNAseq-2/DiffEx_results"
+  host: "Hs" # choices: "Hs", "Mm"
   genes_selection: "host" # choices: "host", "virus", "both" # filter out genes other than this selection
-  # normalized_counts_file: "normalized_counts.tsv"
-  # deg_results_file: "deg_results.tsv"
+  # test dataset 1
+  # counts_file: "~/Documents/Data/Analysis/20250423_RNAseq-1/counts/counts_matrix.tsv"
+  # samplesheet: "~/Documents/Data/Analysis/20250423_RNAseq-1/counts/samples.tsv"
+  # useERCC: FALSE
+  # ercc_mix: 1 # choices: 1, 2
+  # group1: "GFP48h"
+  # group2: "UT"
+  # sample_column: "sampleName"
+  # group_column: "groupName" # DEG will always be based of this column
+  # usebatch: FALSE # use batch as covariate in design matrix
+  # batch_column: "batch"
+  # outdir: "~/Documents/Data/Analysis/20250423_RNAseq-1/DiffEx_results"
+  # host: "Mm" # choices: "Hs", "Mm"
+  # genes_selection: "host" # choices: "host", "virus", "both" # filter out genes other than this selection
+  # thresholds and cutoffs
   log2FC_threshold: 1.0 # use 1.0 and not 1 .. .to make it explicitly float for wrapping python package
   pvalue_threshold: 0.05
   fdr_threshold: 0.05
-  edgeR_cpm_cutoff: 1.0 # use 1.0 and not 1 .. .to make it explicitly float for wrapping python package
+  edgeR_cpm_cutoff: 0.1 # use float to make it explicitly float for wrapping python package
   edgeR_cpm_group_fraction: 0.5
   DESeq2_low_count_cutoff: 2
   DESeq2_low_count_group_fraction: 0.5
-  # prerank_choice: "edgeR" # choices: "edgeR", "DESeq2", "combined"
 
 ---
 
@@ -96,6 +92,8 @@ suppressPackageStartupMessages({
   library(fs)
   library(VennDiagram)
   library(grid)
+  library(sva)
+  library(UpSetR)
 })
 
 exit_gracefully <- function() {
@@ -136,8 +134,11 @@ print(glue::glue(params$samplesheet))
 # Read the sample sheet
 samples <- read.table(params$samplesheet, check.names = FALSE, sep = "\t", header = TRUE)
 keep_cols <- c(params$sample_column, params$group_column)
-if (isTRUE(params$batch)) {
+if (isTRUE(params$usebatch)) {
   keep_cols <- c(keep_cols, params$batch_column)
+  if (!params$batch_column %in% colnames(samples)) {
+    stop(glue::glue("❌ Batch column '{params$batch_column}' not found in samplesheet."))
+  }
 }
 # Find which of the required columns are actually present
 present_cols <- intersect(keep_cols, colnames(samples))
@@ -162,6 +163,7 @@ counts_data <- read.table(params$counts_file,
                      sep = "\t", 
                      header = TRUE)
 colnames(counts_data) <- gsub("-", "_", colnames(counts_data))
+counts_metadata <- counts_data[, c("species", grep("^gene_", colnames(counts_data), value = TRUE))]
 sample_columns <- intersect(colnames(counts_data), samples[[params$sample_column]])
 counts <- counts_data[, sample_columns, drop = FALSE]
 original_counts <- counts
@@ -216,6 +218,7 @@ print(glue::glue("📦 Filtered counts matrix: ", nrow(filtered_counts), " genes
 
 print(glue::glue("Genes selection: ", params$genes_selection))
 print(glue::glue("useERCC: ", params$useERCC))
+print(glue::glue("usebatch: ", params$usebatch))
 
 # Filter out genes based on the genes_selection
 if (params$genes_selection == "host") {
@@ -260,24 +263,35 @@ if (params$genes_selection == "host") {
 print(glue::glue("📦 Filtered counts matrix: ", nrow(filtered_counts), " genes × ", ncol(filtered_counts), " samples"))
 
 counts <- filtered_counts
-ready_for_deg_raw_counts <- counts
-library_sizes <- colSums(counts)
+ready_for_deg_raw_counts <- counts[rowSums(counts) != 0,]
+n_all_zero_genes <- nrow(counts) - nrow(ready_for_deg_raw_counts)
+if (n_all_zero_genes > 0) {
+  print(glue::glue("❌ Warning: ", n_all_zero_genes, " genes have zero counts in all samples and will be removed."))
+} else {
+  print("✅ No all-zero genes found.")
+}
+library_sizes <- colSums(ready_for_deg_raw_counts)
 
 # remove ERCCs genes which have zero reads in any sample
-is_ercc <- grepl("^ERCC", rownames(counts))
-ercc_counts <- counts[is_ercc, ]
+is_ercc <- grepl("^ERCC", rownames(ready_for_deg_raw_counts))
+ercc_counts <- ready_for_deg_raw_counts[is_ercc, ]
 nonzero_ercc_rows <- apply(ercc_counts, 1, function(x) all(x != 0))
-is_nonzero_ercc <- rownames(counts) %in% rownames(ercc_counts)[nonzero_ercc_rows]
+is_nonzero_ercc <- rownames(ready_for_deg_raw_counts) %in% rownames(ercc_counts)[nonzero_ercc_rows]
 remove_ercc <- is_ercc & !is_nonzero_ercc
 
 # update with selected nonzero ERCC genes
-counts <- counts[!remove_ercc, ]
-is_ercc <- grepl("^ERCC", rownames(counts))
+ready_for_deg_raw_counts <- ready_for_deg_raw_counts[!remove_ercc, ]
+is_ercc <- grepl("^ERCC", rownames(ready_for_deg_raw_counts))
 is_endogenous <- !is_ercc
 
 
 samples <- selected_samples
-samples$groupName <- relevel(factor(samples[[params$group_column]], levels = c(g1, g2)),ref = g2)
+rownames(samples)<-samples$sampleName
+samples[[params$group_column]] <- relevel(factor(samples[[params$group_column]], levels = c(g1, g2)),ref = g2)
+
+if (isTRUE(params$usebatch)) {
+  samples[[params$batch_column]] <- factor(samples[[params$batch_column]])
+}
 #exit_gracefully()
 if (isTRUE(params$useERCC)) {
   print(glue::glue("❌ Warning: ",sum(remove_ercc), " ERCC genes have ZERO counts in 1 or more samples and will be excluded!."))
@@ -293,10 +307,10 @@ if (isTRUE(params$useERCC)) {
   if (sum(is_ercc) > 0) {
     print(glue::glue("❌ ",sum(is_ercc)," ERCC genes are present but will be removed before analysis."))
   }
-  counts <- counts[!is_ercc, ]
+  ready_for_deg_raw_counts <- ready_for_deg_raw_counts[!is_ercc, ]
 }
 # Report dimensions
-print(glue::glue("📦 Newly filtered counts matrix: ", nrow(counts), " genes × ", ncol(filtered_counts), " samples"))
+print(glue::glue("📦 Newly filtered counts matrix: ", nrow(ready_for_deg_raw_counts), " genes × ", ncol(ready_for_deg_raw_counts), " samples"))
 ```
 ## Validating group information
 
@@ -331,6 +345,28 @@ if (length(missing_groups) > 0) {
   }
 }
 
+if (isTRUE(params$usebatch)) {
+  # Check if batch column exists
+  if (!params$batch_column %in% colnames(samples)) {
+    stop(glue::glue("❌ Batch column '{params$batch_column}' not found in samplesheet."))
+  }
+  
+  # Check if batch has more than one level
+  if (length(unique(samples[[params$batch_column]])) < 2) {
+    stop(glue::glue("❌ Batch column '{params$batch_column}' must have at least two levels."))
+  }
+  
+  # Check if each batch has at least 1 sample in each group i.e g1 and g2
+  batch_groups <- table(samples[[params$batch_column]], samples[[params$group_column]])
+  for (batch in unique(samples[[params$batch_column]])) {
+    if (any(batch_groups[batch, ] < 1)) {
+      stop(glue::glue("❌ Batch '{batch}' must have at least one sample in each group."))
+    }
+  }
+  
+  print(glue::glue("✅ Batch column '{params$batch_column}' is valid, has multiple levels and each batch has at least one sample in each group."))
+}
+
 ```
 
 ```{r ercc_calculations}
@@ -344,7 +380,8 @@ if (isTRUE(params$useERCC)) {
 
   # ercc_conc <- read.csv("/Users/vishal/Documents/GitRepos/DiffEx/diffex/assets/ERCC92_conc.txt", row.names = 1)
   # TODO: make this txt file part of DiffEx package
-  ercc_url <- "https://raw.githubusercontent.com/mschertzer/ercc_analysis/refs/heads/master/ERCC92_conc.txt"
+  # ercc_url <- "https://raw.githubusercontent.com/mschertzer/ercc_analysis/refs/heads/master/ERCC92_conc.txt"
+  ercc_url <- "https://raw.githubusercontent.com/dremellab/DiffEx/refs/heads/main/diffex/assets/ERCC92_conc.txt"
   
   # Read the tab-delimited ERCC file directly from GitHub
   ercc_conc <- read.delim(ercc_url, check.names = FALSE)
@@ -369,7 +406,8 @@ if (isTRUE(params$useERCC)) {
   # calculated molecules from concentration
   ercc_conc$log2molecules <- log(ercc_conc$ercc_conc / 1000 * 20 * 6.022e5,2)
   
-  counts_df <- as.data.frame(counts)
+  counts_df <- as.data.frame(ready_for_deg_raw_counts)
+  counts_metadata <- counts_data
   counts_df$gene_id <- rownames(counts_df)
   
   counts_data$gene_id <- rownames(counts_data)
@@ -431,13 +469,6 @@ if (isTRUE(params$useERCC)) {
     Rsquared = format(ercc_qc$Rsquared, digits = 3)
   )
   
-  DT::datatable(
-    ercc_norm_df,
-    caption = "📊 ERCC-Based Library Sizes and Intercept/Slope/R-squared",
-    rownames = FALSE,
-    options = list(pageLength = 20, autoWidth = TRUE)
-  )
-  
 # Implement corrected log2RPKM = (log2RPKM - intercept) / slope (per sample)
 pseudo_log2_normalized_counts <- log2_rpkm_counts
 
@@ -459,6 +490,23 @@ for (s in colnames(pseudo_log2_normalized_counts)) {
 }
 ```
 
+```{r ercc_table}
+#| code-fold: true
+#| code-summary: "📊 ERCC Summary Table"
+#| message: true
+#| warning: false
+#| echo: false
+
+if (isTRUE(params$useERCC)) {
+  DT::datatable(
+    ercc_norm_df,
+    caption = "📊 ERCC-Based Library Sizes and Intercept/Slope/R-squared",
+    rownames = FALSE,
+    options = list(pageLength = 20, autoWidth = TRUE)
+  )
+}
+```
+
 
 ```{r functions}
 #| code-fold: true
@@ -466,6 +514,24 @@ for (s in colnames(pseudo_log2_normalized_counts)) {
 #| message: true
 #| warning: false
 #| echo: false
+
+# Adds a gene_id column from rownames if not already present:
+add_gene_id_column_if_missing <- function(df) {
+  if (!"gene_id" %in% colnames(df)) {
+    df$gene_id <- rownames(df)
+  }
+  return(df)
+}
+
+# Moves the gene_id column to rownames if it exists:
+set_gene_id_as_rownames_if_exists <- function(df) {
+  if ("gene_id" %in% colnames(df)) {
+    rownames(df) <- df$gene_id
+    df$gene_id <- NULL
+  }
+  return(df)
+}
+
 
 log2FC_threshold <- params$log2FC_threshold
 pvalue_threshold <- params$pvalue_threshold
@@ -523,85 +589,104 @@ return(violin_plot)
 }
 
 make_pca_plots <- function(normalized_counts,
-                           title = "PCA Plot of Normalized Counts"){
+                           title = "PCA Plot of Normalized Counts") {
 
-normalized_counts <- normalized_counts %>%
-  as.data.frame() %>%
-  {
-    if ("gene" %in% colnames(.)) {
-      rownames(.) <- NULL
-      column_to_rownames(., var = "gene")
-    } else {
-      .  # assume rownames are already gene names
+  # Convert input to data frame and set rownames
+  normalized_counts <- normalized_counts %>%
+    as.data.frame() %>%
+    {
+      if ("gene" %in% colnames(.)) {
+        column_to_rownames(., var = "gene")
+      } else {
+        .
+      }
     }
+
+  # Remove genes with zero variance
+  normalized_counts <- normalized_counts[apply(normalized_counts, 1, var) > 0, ]
+
+  # Perform PCA
+  pca <- prcomp(t(normalized_counts), center = TRUE, scale. = TRUE)
+  pca_data <- as.data.frame(pca$x)
+
+  # % Variance explained
+  pca_var <- pca$sdev^2
+  pca_var_exp <- round(100 * pca_var / sum(pca_var), 1)
+
+  # Annotate PCA metadata
+  pca_data$sample <- rownames(pca_data)
+  pca_data$group <- selected_samples[[params$group_column]][match(pca_data$sample, selected_samples[[params$sample_column]])]
+  pca_data$group <- factor(pca_data$group, levels = c(g1, g2))
+
+  if (isTRUE(params$usebatch)) {
+    pca_data$batch <- selected_samples[[params$batch_column]][match(pca_data$sample, selected_samples[[params$sample_column]])]
+    pca_data$batch <- factor(pca_data$batch)
+  } else {
+    pca_data$batch <- NA
   }
 
-# Perform PCA
-# Remove constant genes (zero variance across samples)
-normalized_counts <- normalized_counts[apply(normalized_counts, 1, function(x) var(x) > 0), ]
-
-# Then run PCA
-pca <- prcomp(t(normalized_counts), center = TRUE, scale. = TRUE)
-
-pca_data <- as.data.frame(pca$x)
-
-# Calculate % variance explained
-pca_var <- pca$sdev^2
-pca_var_exp <- round(100 * pca_var / sum(pca_var), 1)
-
-# Add group and sample info
-pca_data$sample <- rownames(pca_data)
-pca_data$group <- selected_samples[[params$group_column]][match(pca_data$sample, selected_samples[[params$sample_column]])]
-pca_data$group <- factor(pca_data$group, levels = c(g1, g2))
-
-# Create custom hover text
-pca_data$hover <- paste0(
-  "Sample: ", pca_data$sample,
-  "<br>Group: ", pca_data$group,
-  "<br>PC1: ", round(pca_data$PC1, 2),
-  "<br>PC2: ", round(pca_data$PC2, 2)
-)
-
-# Create interactive PCA plot
-pca2d <- plot_ly(
-  data = pca_data,
-  x = ~PC1,
-  y = ~PC2,
-  color = ~group,
-  colors = group_colors,
-  text = ~hover,
-  type = 'scatter',
-  mode = 'markers',
-  marker = list(size = 10),
-  hoverinfo = "text"
-) %>%
-  layout(
-    title = title,
-    xaxis = list(title = paste0("PC1 (", pca_var_exp[1], "%)")),
-    yaxis = list(title = paste0("PC2 (", pca_var_exp[2], "%)")),
-    legend = list(orientation = "h", x = 0.3, y = -0.15)
+  # Hover text for 2D
+  pca_data$hover2d <- paste0(
+    "Sample: ", pca_data$sample,
+    "<br>Group: ", pca_data$group,
+    "<br>Batch: ", pca_data$batch,
+    "<br>PC1: ", round(pca_data$PC1, 2),
+    "<br>PC2: ", round(pca_data$PC2, 2)
   )
 
-# Create hover text
-pca_data$hover <- paste0(
-  "Sample: ", pca_data$sample,
-  "<br>Group: ", pca_data$group,
-  "<br>PC1: ", round(pca_data$PC1, 2),
-  "<br>PC2: ", round(pca_data$PC2, 2),
-  "<br>PC3: ", round(pca_data$PC3, 2)
-)
+  # Hover text for 3D
+  pca_data$hover3d <- paste0(
+    "Sample: ", pca_data$sample,
+    "<br>Group: ", pca_data$group,
+    "<br>Batch: ", pca_data$batch,
+    "<br>PC1: ", round(pca_data$PC1, 2),
+    "<br>PC2: ", round(pca_data$PC2, 2),
+    "<br>PC3: ", round(pca_data$PC3, 2)
+  )
 
-# 3D interactive PCA plot
-pca3d <- plot_ly(
+  # 2D PCA plot
+  pca2d <- plot_ly(
+    data = pca_data,
+    x = ~PC1,
+    y = ~PC2,
+    color = ~group,
+    colors = group_colors,
+    text = ~hover2d,
+    type = 'scatter',
+    mode = 'markers',
+    symbol = if (isTRUE(params$usebatch)) ~batch else I("circle"),
+    symbols = if (isTRUE(params$usebatch)) "circle-open" else NULL,
+    marker = list(size = 10),
+    hoverinfo = "text"
+  ) %>%
+    layout(
+      title = title,
+      height = 800,
+      xaxis = list(title = paste0("PC1 (", pca_var_exp[1], "%)")),
+      yaxis = list(title = paste0("PC2 (", pca_var_exp[2], "%)")),
+      legend = list(
+        orientation = "v",   # vertical legend
+        x = 1.05,            # move to right outside plot
+        y = 1,
+        font = list(size = 10),
+        itemsizing = 'constant'
+      ),
+      margin = list(r = 150) # add room on right for legend
+    )
+
+
+  # 3D PCA plot
+  pca3d <- plot_ly(
   data = pca_data,
   x = ~PC1,
   y = ~PC2,
   z = ~PC3,
   color = ~group,
   colors = group_colors,
-  text = ~hover,
+  text = ~hover3d,
   type = "scatter3d",
   mode = "markers",
+  symbol = if (isTRUE(params$usebatch)) ~batch else I("circle"),
   marker = list(size = 5),
   hoverinfo = "text"
 ) %>%
@@ -612,95 +697,115 @@ pca3d <- plot_ly(
       yaxis = list(title = paste0("PC2 (", pca_var_exp[2], "%)")),
       zaxis = list(title = paste0("PC3 (", pca_var_exp[3], "%)"))
     ),
-    legend = list(orientation = "h", x = 0.3, y = -0.1)
+    legend = list(
+      orientation = "v",   # vertical layout
+      x = 1.05,            # push legend to the right
+      y = 1,
+      font = list(size = 10),
+      itemsizing = 'constant'
+    ),
+    margin = list(r = 150)  # increase right margin
   )
-    return(list(
+
+  return(list(
     pca2d = pca2d,
     pca3d = pca3d
   ))
 }
 
+
+
 make_volcano_plot <- function(volcano_df,
                               pvalue_column_name = "PValue",
                               logFC_column_name = "logFC",
-                              FDR_column_name = "FDR"
-){
+                              FDR_column_name = "FDR") {
 
-# remove all rows where Pvalue is NA
-volcano_df <- volcano_df[!is.na(volcano_df[[pvalue_column_name]]), ]
-# remove all rows where logFC is NA
-volcano_df <- volcano_df[!is.na(volcano_df[[logFC_column_name]]), ]
+  # Remove rows with NA in key columns
+  volcano_df <- volcano_df[!is.na(volcano_df[[pvalue_column_name]]), ]
+  volcano_df <- volcano_df[!is.na(volcano_df[[logFC_column_name]]), ]
 
-# Rename logFC column to "logFC" if needed
-if (logFC_column_name != "logFC") {
-  names(volcano_df)[names(volcano_df) == logFC_column_name] <- "logFC"
-}
-if (pvalue_column_name != "PValue") {
-  names(volcano_df)[names(volcano_df) == pvalue_column_name] <- "PValue"
-}
-if (FDR_column_name != "FDR") {
-  names(volcano_df)[names(volcano_df) == FDR_column_name] <- "FDR"
-}
+  # Rename columns if needed
+  if (logFC_column_name != "logFC") {
+    names(volcano_df)[names(volcano_df) == logFC_column_name] <- "logFC"
+  }
+  if (pvalue_column_name != "PValue") {
+    names(volcano_df)[names(volcano_df) == pvalue_column_name] <- "PValue"
+  }
+  if (FDR_column_name != "FDR") {
+    names(volcano_df)[names(volcano_df) == FDR_column_name] <- "FDR"
+  }
 
-volcano_df$logP <- -log10(volcano_df$PValue)
+  # Compute -log10(P)
+  volcano_df$logP <- -log10(volcano_df$PValue)
 
-# Categorize each gene
-volcano_df$Significance <- "NS"  # Default: not significant
-volcano_df$Significance[volcano_df$PValue < pvalue_threshold & abs(volcano_df$logFC) >= log2FC_threshold] <- "p-value and log2FC"
-volcano_df$Significance[volcano_df$PValue < pvalue_threshold & abs(volcano_df$logFC) < log2FC_threshold] <- "p-value"
-volcano_df$Significance[volcano_df$PValue >= pvalue_threshold & abs(volcano_df$logFC) >= log2FC_threshold] <- "Log2FC"
+  # Significance categories
+  volcano_df$Significance <- "NS"
+  volcano_df$Significance[volcano_df$PValue < pvalue_threshold & abs(volcano_df$logFC) >= log2FC_threshold] <- "p-value and log2FC"
+  volcano_df$Significance[volcano_df$PValue < pvalue_threshold & abs(volcano_df$logFC) < log2FC_threshold] <- "p-value"
+  volcano_df$Significance[volcano_df$PValue >= pvalue_threshold & abs(volcano_df$logFC) >= log2FC_threshold] <- "Log2FC"
 
-# Define custom colors
-sig_colors <- c(
-  "NS" = "gray",
-  "Log2FC" = "#009E73",             # Green
-  "p-value" = "#0072B2",            # Blue
-  "p-value and log2FC" = "red"  # Red
-)
+  # NEW: Define shape group based on FDR + logFC thresholds
+  volcano_df$ShapeGroup <- ifelse(!is.na(volcano_df$FDR) &
+                                     volcano_df$FDR < fdr_threshold &
+                                     abs(volcano_df$logFC) > log2FC_threshold,
+                                   "Significant FDR", "Default")
 
-# Create hover text
-volcano_df$hover <- paste0(
-  "Gene: ", volcano_df$gene,
-  "<br>logFC: ", round(volcano_df$logFC, 2),
-  "<br>FDR: ", ifelse(is.na(volcano_df$FDR), NA, signif(volcano_df$FDR, 3)),
-  "<br>PValue: ", signif(volcano_df$PValue, 3)
-)
-
-# Plot
-volcano_plotly <- plot_ly(
-  data = volcano_df,
-  x = ~logFC,
-  y = ~logP,
-  type = "scatter",
-  mode = "markers",
-  color = ~Significance,
-  colors = sig_colors,
-  text = ~hover,
-  hoverinfo = "text",
-  marker = list(size = 6)
-) %>%
-  layout(
-    title = list(text = paste0("Volcano Plot: ", g1, " vs ", g2)),
-    xaxis = list(title = "log2 Fold Change"),
-    yaxis = list(title = "-log10(P-value)"),
-    legend = list(title = list(text = "Significance"), orientation = "h", x = 0.3, y = -0.2),
-    shapes = list(
-      # Horizontal line at -log10(0.05)
-      list(type = "line", x0 = min(volcano_df$logFC), x1 = max(volcano_df$PValue),
-           y0 = -log10(pvalue_threshold), y1 = -log10(pvalue_threshold),
-           line = list(dash = "dot", width = 1, color = "black")),
-      # Vertical line at logFC = -1
-      list(type = "line", x0 = -1 * log2FC_threshold, x1 = -1 * log2FC_threshold,
-           y0 = 0, y1 = max(volcano_df$logP),
-           line = list(dash = "dot", width = 1, color = "black")),
-      # Vertical line at logFC = 1
-      list(type = "line", x0 = log2FC_threshold, x1 = log2FC_threshold,
-           y0 = 0, y1 = max(volcano_df$logP),
-           line = list(dash = "dot", width = 1, color = "black"))
-    )
+  # Colors
+  sig_colors <- c(
+    "NS" = "gray",
+    "Log2FC" = "#009E73",
+    "p-value" = "#0072B2",
+    "p-value and log2FC" = "red"
   )
-return(volcano_plotly)
+
+  # Shapes
+  shape_map <- c("Default" = "circle", "Significant FDR" = "x")
+
+  # Hover text
+  volcano_df$hover <- paste0(
+    "Gene: ", volcano_df$gene,
+    "<br>logFC: ", round(volcano_df$logFC, 2),
+    "<br>FDR: ", ifelse(is.na(volcano_df$FDR), NA, signif(volcano_df$FDR, 3)),
+    "<br>PValue: ", signif(volcano_df$PValue, 3)
+  )
+
+  # Plot
+  volcano_plotly <- plot_ly(
+    data = volcano_df,
+    x = ~logFC,
+    y = ~logP,
+    type = "scatter",
+    mode = "markers",
+    color = ~Significance,
+    symbol = ~ShapeGroup,
+    symbols = shape_map,
+    colors = sig_colors,
+    text = ~hover,
+    hoverinfo = "text",
+    marker = list(size = 6),
+    showlegend = FALSE
+  ) %>%
+    layout(
+      title = list(text = paste0("Volcano Plot: ", g1, " vs ", g2)),
+      xaxis = list(title = "log2 Fold Change"),
+      yaxis = list(title = "-log10(P-value)"),
+      legend = list(title = list(text = "Significance"), orientation = "h", x = 0.3, y = -0.2),
+      shapes = list(
+        list(type = "line", x0 = min(volcano_df$logFC), x1 = max(volcano_df$logFC),
+             y0 = -log10(pvalue_threshold), y1 = -log10(pvalue_threshold),
+             line = list(dash = "dot", width = 1, color = "black")),
+        list(type = "line", x0 = -log2FC_threshold, x1 = -log2FC_threshold,
+             y0 = 0, y1 = max(volcano_df$logP),
+             line = list(dash = "dot", width = 1, color = "black")),
+        list(type = "line", x0 = log2FC_threshold, x1 = log2FC_threshold,
+             y0 = 0, y1 = max(volcano_df$logP),
+             line = list(dash = "dot", width = 1, color = "black"))
+      )
+    )
+
+  return(volcano_plotly)
 }
+
 
 add_gsea_rank_score <- function(df) {
   # Calculate sign of log2FoldChange
@@ -735,18 +840,72 @@ add_gsea_rank_score <- function(df) {
 #| warning: false
 #| echo: false
 
+  group_design <- model.matrix(~ 0 + samples[[params$group_column]])
+  colnames(group_design) <- levels(samples[[params$group_column]])
+  if (isTRUE(params$usebatch)) {
+    # Model matrix for batch
+    batch_design <- model.matrix(~ 0 + samples[[params$batch_column]])
+    colnames(batch_design) <- levels(samples[[params$batch_column]])
+    
+    # Combine batch and group designs
+    raw_design <- cbind(batch_design, group_design)
+    
+    # Compute QR decomposition to get full-rank column indices
+    qr_decomp <- qr(raw_design)
+    rank_cols <- qr_decomp$pivot[1:qr_decomp$rank]
+    full_rank_colnames <- colnames(raw_design)[rank_cols]
+    
+    # Ensure both group1 and group2 are included
+    required_cols <- c(params$group1, params$group2)
+    missing_required <- setdiff(required_cols, full_rank_colnames)
+    
+    # If any required contrast col is missing, replace a non-required one
+    if (length(missing_required) > 0) {
+      # Find replaceable columns (in full_rank but not required)
+      replaceable <- setdiff(full_rank_colnames, required_cols)
+      if (length(replaceable) < length(missing_required)) {
+        stop("Cannot construct a full-rank model matrix including both contrast terms.")
+      }
+      # Replace first few replaceable cols with missing_required
+      full_rank_colnames <- union(setdiff(full_rank_colnames, replaceable[1:length(missing_required)]),
+                                  missing_required)
+    }
+    
+    # Subset the final design
+    limma_design <- raw_design[, full_rank_colnames, drop = FALSE]
+  } else {
+    # directly use group_design
+    limma_design <- group_design
+  }
+  # Build contrast string from group levels (column names in this case)
+  contrast_str <- paste0(params$group1, " - ", params$group2)
+  
+  # Make contrasts using new combined design
+  contrast_matrix <- makeContrasts(
+    contrasts = contrast_str,
+    levels = limma_design
+  )
+
+
 if (isTRUE(params$useERCC)) {
   
   print(glue::glue("✅ ERCC standard curve slope - based normalization enabled."))
   dims <- dim(pseudo_log2_normalized_counts)
+  
+  # get batch corrected counts
+  if (isTRUE(params$usebatch)){
+    pseudo_log2_normalized_counts_batch_corrected <- limma::removeBatchEffect(
+      pseudo_log2_normalized_counts,
+      batch = samples[[params$batch_column]],
+      design = model.matrix(~ 0 + samples[[params$group_column]])
+    )
+    pseudo_log2_normalized_counts_batch_corrected <- as.data.frame(pseudo_log2_normalized_counts_batch_corrected)
+  }
+  
   # Use pseudo_log2_normalized_counts for limma analysis
-  limma_design <- as.formula(sub("~\\s*", "~ 0 + ", params$design_formula))
-  limma_model_matrix <- model.matrix(limma_design, data = samples)
-  contrast_str <- paste0("groupName", params$group1, " - groupName", params$group2)
-  contrast_matrix <- makeContrasts(contrasts = contrast_str, levels = limma_model_matrix)
   
   # fit the model
-  fit <- lmFit(pseudo_log2_normalized_counts, limma_model_matrix)
+  fit <- lmFit(pseudo_log2_normalized_counts, limma_design)
   
   # run contrasts
   fit2 <- contrasts.fit(fit, contrast_matrix)
@@ -757,27 +916,47 @@ if (isTRUE(params$useERCC)) {
 ## no ERCCs
 } else {
   print(glue::glue("✅ Using Limma-voom for normalization."))
-  group <- factor(samples$groupName, levels = c(g2, g1))  # g2 is reference level
-  dge <- DGEList(counts = counts, group = group)
+
+  # 1. Create DGEList
+  dge <- DGEList(counts = ready_for_deg_raw_counts)
+  group <- samples[[params$group_column]]
+  dge$samples$group <- group
+  if (isTRUE(params$usebatch)) {
+    batch <- samples[[params$batch_column]]
+    dge$samples$batch <- batch
+  }
+  
+  # 2. Filtering
   keep <- filterByExpr(dge, group = group)
   dge <- dge[keep,, keep.lib.sizes = FALSE]
-  dge <- calcNormFactors(dge)
+  dge <- calcNormFactors(dge)  
+
+  # 3. Design matrix with optional batch covariate
+  # using limma_design
   
-  limma_design <- model.matrix(~ 0 + group, data = samples)
-  colnames(limma_design) <- levels(samples$groupName)
-  # voom_plot <- NULL
-  v <- voom(dge, limma_design, plot = TRUE)  # suppress direct plot
+  # 4. Voom
+  v <- voom(dge, limma_design, plot = TRUE)
   
+  # 5. Save log2 values
   log2_raw_cpm <- as.data.frame(cpm(dge, log = TRUE, prior.count = 1))
   log2_normalized_counts_limma <- as.data.frame(v$E)
   dims <- dim(log2_normalized_counts_limma)
-  # voom_plot <- plot(v$voom.xy$x, v$voom.xy$y, pch = 20, main = "Voom: Mean-Variance Trend",
-                    # xlab = "log2(CPM)", ylab = "√(standard deviation)")
+  
+  if (isTRUE(params$usebatch)){
+    log2_normalized_counts_limma_batch_corrected <- limma::removeBatchEffect(
+      log2_normalized_counts_limma,
+      batch = samples[[params$batch_column]],
+      design = model.matrix(~ 0 + samples[[params$group_column]])
+    )
+    log2_normalized_counts_limma_batch_corrected <- as.data.frame(log2_normalized_counts_limma_batch_corrected)
+  }
+
+  # 6. Fit model and test contrasts
   fit <- lmFit(v, limma_design)
-  contrast_str <- paste0(params$group1, " - ", params$group2)
-  contrast_matrix <- makeContrasts(contrasts = contrast_str, levels = limma_design)
   fit2 <- contrasts.fit(fit, contrast_matrix)
   fit2 <- eBayes(fit2)
+  
+  # 7. Results
   top_genes <- topTable(fit2, number = Inf)
 }
 
@@ -796,15 +975,19 @@ if (isTRUE(params$useERCC)) {
   print(glue::glue("📊 log2 normalized pseudo RPKM counts matrix dimensions: {dims[1]} genes × {dims[2]} samples"))
 } else {
   print(glue::glue("📊 log2 normalized counts matrix dimensions post filterByExpr: {dims[1]} genes × {dims[2]} samples"))
+  limma_sampleinfo_df <- as.data.frame(dge$samples) %>%
+    rownames_to_column(var = "Sample") %>%
+    mutate(
+      Group = group,
+      LibrarySize = lib.size,
+      NormFactor = signif(norm.factors, 3),
+      Batch = if ("batch" %in% colnames(.)) batch else NA
+    ) %>%
+    dplyr::select(Sample, Group, any_of("Batch"),LibrarySize, NormFactor) %>%
+    dplyr::select(where(~ !all(is.na(.))))
+  
   DT::datatable(
-    as.data.frame(dge$samples) %>%
-      rownames_to_column(var = "Sample") %>%
-      mutate(
-        Group = group,
-        LibrarySize = lib.size,
-        NormFactor = signif(norm.factors, 3)
-      ) %>%
-      dplyr::select(Sample, Group, LibrarySize, NormFactor),
+    limma_sampleinfo_df,
     caption = "📊 Library Sizes and Normalization Factors",
     rownames = FALSE,
     options = list(pageLength = 20, autoWidth = TRUE)
@@ -820,43 +1003,68 @@ if (isTRUE(params$useERCC)) {
 
 
 if (isTRUE(params$useERCC)) {
-normalized_counts_file <- file.path(counts_dir, "limma_log2normalized_pseudo_rpkm_counts.tsv")
-
-  # Save normalized counts to a file
-as.data.frame(pseudo_log2_normalized_counts) %>%
-  rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_for_output
-write.table(pseudo_log2_normalized_counts_for_output,
-            file = normalized_counts_file,
-            sep = "\t",
-            quote = FALSE,
-            col.names = TRUE,
-            row.names = FALSE)
-print(glue::glue("💾 Normalized counts saved to: ", normalized_counts_file))
-
-pseudo_rpkm_counts <- 2^pseudo_log2_normalized_counts/20000
-pseudo_rpkm_counts[is.na(pseudo_rpkm_counts)] <- 0
-pseudo_rpkm_counts_for_output <- as.data.frame(pseudo_rpkm_counts) %>%
-  rownames_to_column(var = "gene")
-pseudo_rpkm_counts_file <- file.path(counts_dir, "limma_pseudo_rpkm_counts.tsv")
-write.table(pseudo_rpkm_counts_for_output,
-            file = pseudo_rpkm_counts_file,
-            sep = "\t",
-            quote = FALSE,
-            col.names = TRUE,
-            row.names = FALSE)
-} else {
-normalized_counts_file <- file.path(counts_dir, "limma_voom_normalized_counts.tsv")
-
-as.data.frame(log2_normalized_counts_limma) %>%
-  rownames_to_column(var = "gene") -> log2_normalized_counts_limma_for_output
-write.table(log2_normalized_counts_limma_for_output,
-            file = normalized_counts_file,
-            sep = "\t",
-            quote = FALSE,
-            col.names = TRUE,
-            row.names = FALSE)
-print(glue::glue("💾 Normalized counts saved to: ", normalized_counts_file))
+  normalized_counts_file <- file.path(counts_dir, "limma_log2normalized_pseudo_rpkm_counts.tsv")
   
+    # Save normalized counts to a file
+  as.data.frame(pseudo_log2_normalized_counts) %>%
+    rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_for_output
+  write.table(pseudo_log2_normalized_counts_for_output,
+              file = normalized_counts_file,
+              sep = "\t",
+              quote = FALSE,
+              col.names = TRUE,
+              row.names = FALSE)
+  print(glue::glue("💾 Normalized counts saved to: ", normalized_counts_file))
+  
+  pseudo_rpkm_counts <- 2^pseudo_log2_normalized_counts/20000
+  pseudo_rpkm_counts[is.na(pseudo_rpkm_counts)] <- 0
+  pseudo_rpkm_counts_for_output <- as.data.frame(pseudo_rpkm_counts) %>%
+    rownames_to_column(var = "gene")
+  pseudo_rpkm_counts_file <- file.path(counts_dir, "limma_pseudo_rpkm_counts.tsv")
+  write.table(pseudo_rpkm_counts_for_output,
+              file = pseudo_rpkm_counts_file,
+              sep = "\t",
+              quote = FALSE,
+              col.names = TRUE,
+              row.names = FALSE)
+  if (isTRUE(params$usebatch)) {
+    pseudo_log2_normalized_counts_batch_corrected_file <- file.path(counts_dir, "limma_log2normalized_pseudo_rpkm_counts_batch_corrected.tsv")
+    as.data.frame(pseudo_log2_normalized_counts_batch_corrected) %>%
+      rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_batch_corrected_for_output
+    write.table(pseudo_log2_normalized_counts_batch_corrected_for_output,
+                file = pseudo_log2_normalized_counts_batch_corrected_file,
+                sep = "\t",
+                quote = FALSE,
+                col.names = TRUE,
+                row.names = FALSE)
+    print(glue::glue("💾 Batch corrected normalized counts saved to: ", pseudo_log2_normalized_counts_batch_corrected_file))
+  }
+} else {
+  normalized_counts_file <- file.path(counts_dir, "limma_voom_normalized_counts.tsv")
+  
+  as.data.frame(log2_normalized_counts_limma) %>%
+    rownames_to_column(var = "gene") -> log2_normalized_counts_limma_for_output
+  write.table(log2_normalized_counts_limma_for_output,
+              file = normalized_counts_file,
+              sep = "\t",
+              quote = FALSE,
+              col.names = TRUE,
+              row.names = FALSE)
+  print(glue::glue("💾 Normalized counts saved to: ", normalized_counts_file))
+  
+  if (isTRUE(params$usebatch)){
+    log2_normalized_counts_limma_batch_corrected_file <- file.path(counts_dir, "limma_voom_normalized_counts_batch_corrected.tsv")
+    as.data.frame(log2_normalized_counts_limma_batch_corrected) %>%
+      rownames_to_column(var = "gene") -> log2_normalized_counts_limma_batch_corrected_for_output
+    write.table(log2_normalized_counts_limma_batch_corrected_for_output,
+                file = log2_normalized_counts_limma_batch_corrected_file,
+                sep = "\t",
+                quote = FALSE,
+                col.names = TRUE,
+                row.names = FALSE)
+    print(glue::glue("💾 Batch corrected normalized counts saved to: ", log2_normalized_counts_limma_batch_corrected_file))
+  }
+
 }
 # exit_gracefully()
 ```
@@ -903,17 +1111,40 @@ violin_plot
 
 # Create violin plot of normalized counts
 if (isTRUE(params$useERCC)) {
-  pseudo_log2_normalized_counts_for_plots <- pseudo_log2_normalized_counts[!apply(pseudo_log2_normalized_counts, 1, function(x) any(is.na(x) | is.infinite(x))), ]
-  violin_plot <- make_violin_plot(pseudo_log2_normalized_counts_for_plots,
-                                   xlab = "Sample",
-                                   ylab = "Log2 Normalized Pseudo RPKM Counts",
-                                   title = "")
+  if (isTRUE(params$usebatch)) {
+    pseudo_log2_normalized_counts_batch_corrected_for_plots <- pseudo_log2_normalized_counts_batch_corrected[!apply(pseudo_log2_normalized_counts_batch_corrected, 1, function(x) any(is.na(x) | is.infinite(x))), ]
+    as.data.frame(pseudo_log2_normalized_counts_batch_corrected_for_plots) %>% rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_batch_corrected_for_plots
+    ylabel <- "Log2 Normalized Pseudo RPKM Counts (Batch Corrected)"
+    violin_plot <- make_violin_plot(pseudo_log2_normalized_counts_batch_corrected_for_plots,
+                                     xlab = "Sample",
+                                     ylab = ylabel,
+                                     title = "")
+  } else {
+    pseudo_log2_normalized_counts_for_plots <- pseudo_log2_normalized_counts[!apply(pseudo_log2_normalized_counts, 1, function(x) any(is.na(x) | is.infinite(x))), ]
+    as.data.frame(pseudo_log2_normalized_counts_for_plots) %>% rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_for_plots
+    ylabel <- "Log2 Normalized Pseudo RPKM Counts"
+    violin_plot <- make_violin_plot(pseudo_log2_normalized_counts_for_plots,
+                                     xlab = "Sample",
+                                     ylab = ylabel,
+                                     title = "")
+  }
 } else {
-  log2_normalized_counts_limma %>% rownames_to_column(var = "gene") -> log2_normalized_counts_limma_for_plots
-  violin_plot <- make_violin_plot(log2_normalized_counts_limma_for_plots,
-                                   xlab = "Sample",
-                                   ylab = "Log2 Normalized Counts",
-                                   title = "")
+  if (isTRUE(params$usebatch)) {
+    log2_normalized_counts_limma_batch_corrected %>% rownames_to_column(var = "gene") -> log2_normalized_counts_limma_batch_corrected_for_plots
+    ylabel <- "Log2 Normalized Counts (Batch Corrected)"
+    violin_plot <- make_violin_plot(log2_normalized_counts_limma_batch_corrected_for_plots,
+                               xlab = "Sample",
+                               ylab = ylabel,
+                               title = "")
+
+  } else {
+    log2_normalized_counts_limma %>% rownames_to_column(var = "gene") -> log2_normalized_counts_limma_for_plots
+    ylabel <- "Log2 Normalized Counts"
+    violin_plot <- make_violin_plot(log2_normalized_counts_limma_for_plots,
+                                 xlab = "Sample",
+                                 ylab = ylabel,
+                                 title = "")
+  }
 }
 violin_plot
 ```
@@ -963,11 +1194,21 @@ pcas_before$pca2d
 #| fig.show: "hold"
 #| warning: false
 if (isTRUE(params$useERCC)) {
-  pcas_after <- make_pca_plots(pseudo_log2_normalized_counts_for_plots,
+    if (isTRUE(params$usebatch)) {
+    pcas_after <- make_pca_plots(pseudo_log2_normalized_counts_batch_corrected_for_plots,
+                               title = "PCA Plot of Log2 Normalized Pseudo RPKM Counts (Batch corrected)")
+  } else {
+    pcas_after <- make_pca_plots(pseudo_log2_normalized_counts_for_plots,
                                title = "PCA Plot of Log2 Normalized Pseudo RPKM Counts")
+  }  
 } else {
-pcas_after <- make_pca_plots(log2_normalized_counts_limma_for_plots,
+    if (isTRUE(params$usebatch)) {
+    pcas_after <- make_pca_plots(log2_normalized_counts_limma_batch_corrected_for_plots,
+                               title = "PCA Plot of voom Normalized Counts (Batch corrected)")
+  } else {
+    pcas_after <- make_pca_plots(log2_normalized_counts_limma_for_plots,
                                title = "PCA Plot of voom Normalized Counts")
+  }
 }
 pcas_after$pca2d
 ```
@@ -1122,7 +1363,6 @@ volcano_plotly
 
 
 
-
 # edgeR analysis
 
 ## CPM Filtering
@@ -1137,7 +1377,7 @@ if (isTRUE(params$useERCC)) {
   ready_for_deg_raw_counts <- round(pseudo_rpkm_counts)
 }
 
-dge_edger <- DGEList(counts = ready_for_deg_raw_counts, samples = samples, group = samples$groupName)
+dge_edger <- DGEList(counts = ready_for_deg_raw_counts, samples = samples, group = samples[[params$group_column]])
 
 cpm_mat <- cpm(dge_edger, log = FALSE)
 group <- dge_edger$samples$group
@@ -1182,186 +1422,33 @@ if (isTRUE(params$useERCC)) {
 }
 ```
 
+## Sample Info
+
 ```{r edger_normfactor_table, echo=FALSE}
 #| code-fold: true
 #| code-summary: "🧬 ERCC datatable"
 #| message: true
 #| warning: false
 # Only run if normalization used ERCCs
-  DT::datatable(
-    as.data.frame(dge_final$samples) %>%
+
+  edger_sampleinfo_df <- as.data.frame(dge_final$samples) %>%
       rownames_to_column(var = "Sample") %>%
       mutate(
         Group = group,
         LibrarySize = lib.size,
-        NormFactor = signif(norm.factors, 3)
-      ) %>%
-      dplyr::select(Sample, Group, LibrarySize, NormFactor),
+        NormFactor = signif(norm.factors, 3),
+        Batch = if ("batch" %in% colnames(.)) batch else NA
+  ) %>%
+    dplyr::select(Sample, Group, any_of("Batch"),LibrarySize, NormFactor) %>%
+    dplyr::select(where(~ !all(is.na(.))))
+  
+  DT::datatable(
+    edger_sampleinfo_df,
     caption = "📊 Library Sizes and Normalization Factors",
     rownames = FALSE,
     options = list(pageLength = 20, autoWidth = TRUE)
   )
 ```
-
-<!-- ## Norm Factor Plot -->
-
-<!-- ```{r normfactorplot} -->
-<!-- #| code-fold: true -->
-<!-- #| code-summary: "📊 Normalization Factor Plot" -->
-<!-- #| fig.width: 8 -->
-<!-- #| fig.height: 6 -->
-<!-- #| out.width: "100%" -->
-<!-- #| out.height: "100%" -->
-<!-- #| fig.align: "center" -->
-<!-- #| fig.show: "hold" -->
-<!-- #| warning: false -->
-<!-- dge_samples_df <- as.data.frame(dge_final$samples) %>%  -->
-<!--   rownames_to_column(var = "Sample") %>% -->
-<!--   mutate( -->
-<!--     Group = group, -->
-<!--     LibrarySize = lib.size, -->
-<!--     NormFactor = signif(norm.factors, 3) -->
-<!--   ) %>% -->
-<!--   dplyr::select(Sample, Group, LibrarySize, NormFactor) -->
-
-<!-- # if original samples contains params$batch_column, add it to dge_samples_df -->
-<!-- # Optionally add Batch to dge_samples_df -->
-<!-- if (params$batch_column %in% colnames(samples)) { -->
-<!--   dge_samples_df$Batch <- selected_samples[[params$batch_column]][match(dge_samples_df$Sample, selected_samples[[params$sample_column]])] -->
-<!--   # Assign colors based on Batch -->
-<!--   dge_samples_df$Color <- group_colors[dge_samples_df$Group] -->
-
-
-<!-- # Step 1: Define available shapes and assign per batch -->
-<!-- available_shapes <- c("circle", "square", "diamond", "cross", "x",  -->
-<!--                       "triangle-up", "triangle-down", "triangle-left",  -->
-<!--                       "triangle-right", "star") -->
-
-<!-- batches <- unique(dge_samples_df$Batch) -->
-<!-- batch_shapes <- setNames( -->
-<!--   rep(available_shapes, length.out = length(batches)), -->
-<!--   batches -->
-<!-- ) -->
-
-<!-- # Step 2: Create the plot -->
-<!-- p <- plot_ly() -->
-
-<!-- # Add real colored points (per group), no legend -->
-<!-- p <- p %>% add_trace( -->
-<!--   data = dge_samples_df, -->
-<!--   x = ~LibrarySize, -->
-<!--   y = ~NormFactor, -->
-<!--   text = ~Sample, -->
-<!--   type = "scatter", -->
-<!--   mode = "markers", -->
-<!--   marker = list( -->
-<!--     color = dge_samples_df$Color, -->
-<!--     symbol = unname(batch_shapes[dge_samples_df$Batch]) -->
-<!--   ), -->
-<!--   name="", -->
-<!--   hoverinfo = "text", -->
-<!--   showlegend = FALSE -->
-<!-- ) -->
-
-<!-- # Step 3: Add dummy black points for legend only -->
-<!-- for (b in batches) { -->
-<!--   shape <- batch_shapes[b] -->
-<!--   p <- p %>% add_trace( -->
-<!--     x = 0, y = 0,  # Off-plot dummy point -->
-<!--     type = "scatter", -->
-<!--     mode = "markers", -->
-<!--     marker = list( -->
-<!--       color = "black", -->
-<!--       symbol = shape, -->
-<!--       size = 5 -->
-<!--     ), -->
-<!--     name = b, -->
-<!--     showlegend = TRUE, -->
-<!--     hoverinfo = "none", -->
-<!--     legendgroup = b -->
-<!--   ) -->
-<!-- } -->
-
-<!-- # Step 4: Layout -->
-<!-- p <- p %>% layout( -->
-<!--   title = "Library Size vs Normalization Factor", -->
-<!--   xaxis = list(title = "Library Size"), -->
-<!--   yaxis = list(title = "Normalization Factor"), -->
-<!--   legend = list(title = list(text = "Batch")) -->
-<!-- ) -->
-
-<!-- p -->
-
-<!-- } else { -->
-
-<!-- # Base plot setup -->
-<!-- p <- plot_ly(dge_samples_df,  -->
-<!--              x = ~LibrarySize,  -->
-<!--              y = ~NormFactor,  -->
-<!--              text = ~Sample,  -->
-<!--              color = ~Group, -->
-<!--              colors = group_colors, -->
-<!--              type = "scatter",  -->
-<!--              mode = "markers") -->
-
-<!-- # Final layout -->
-<!-- p <- p %>% layout( -->
-<!--   title = "Library Size vs Normalization Factor", -->
-<!--   xaxis = list(title = "Library Size"), -->
-<!--   yaxis = list(title = "Normalization Factor") -->
-<!-- ) -->
-
-<!-- p -->
-
-<!-- } -->
-
-<!-- # exit_gracefully() -->
-<!-- ``` -->
-
-
-
-<!-- ## Sample Info -->
-
-<!-- ```{r sample_table} -->
-<!-- #| code-fold: true -->
-<!-- #| code-summary: "📋 Sample Metadata with Library Sizes and Norm Factors" -->
-<!-- #| warning: false -->
-<!-- #| message: false -->
-
-<!-- # Extract sample info from dge object -->
-<!-- sample_info <- dge_final$samples %>% -->
-<!--   tibble::rownames_to_column(var = "Sample") %>% -->
-<!--   mutate( -->
-<!--     Group = group, -->
-<!--     LibrarySize = format(lib.size, big.mark = ","), -->
-<!--     NormFactor = formatC(norm.factors, format = "f", digits = 3) -->
-<!--   ) -->
-
-<!-- if (params$batch_column %in% colnames(sample_info)) { -->
-<!--   sample_info <- sample_info %>% -->
-<!--     mutate(Batch = .[[params$batch_column]]) -->
-<!-- } else { -->
-<!--   sample_info <- sample_info %>% -->
-<!--     mutate(Batch = NA) -->
-<!-- } -->
-
-<!-- sample_info <- sample_info %>% -->
-<!--   dplyr::select(Sample, Group, LibrarySize, NormFactor, Batch) -->
-
-
-<!-- DT::datatable( -->
-<!--   sample_info, -->
-<!--   options = list( -->
-<!--     pageLength = 20, -->
-<!--     autoWidth = TRUE, -->
-<!--     columnDefs = list(list(className = 'dt-center', targets = "_all")) -->
-<!--   ), -->
-<!--   rownames = FALSE -->
-<!-- ) -->
-
-<!-- # exit_gracefully() -->
-
-<!-- ``` -->
 
 ```{r edger_save_normalized_counts}
 #| code-fold: true
@@ -1369,17 +1456,39 @@ if (isTRUE(params$useERCC)) {
 #| message: true
 #| warning: false
 # Save normalized counts to a file
-normalized_counts <- cpm(dge_final, normalized.lib.sizes = TRUE, log = TRUE)
-as.data.frame(normalized_counts) %>%
-  rownames_to_column(var = "gene") -> normalized_counts_for_output
+normalized_counts_edger <- as.data.frame(cpm(dge_final, normalized.lib.sizes = TRUE, log = TRUE))
+normalized_counts_edger %>%
+  rownames_to_column(var = "gene") -> normalized_counts_edger_for_plots
 normalized_counts_file <- file.path(counts_dir, "edgeR_TMM_normalized_logCPM_counts.tsv")
-write.table(normalized_counts_for_output,
+write.table(normalized_counts_edger_for_plots,
             file = normalized_counts_file,
             sep = "\t",
             quote = FALSE,
             col.names = TRUE,
             row.names = FALSE)
 print(glue::glue("💾 Normalized counts saved to: ", normalized_counts_file))
+
+if (isTRUE(params$usebatch)) {
+
+  # Get batch and optional biological condition
+  batch <- samples[[params$batch_column]]
+  group <- samples[[params$group_column]]
+  mod <- model.matrix(~ group)  # Preserve biological signal
+  
+  # Apply ComBat on normalized logCPM
+  normalized_counts_edger_batch_corrected <- as.data.frame(sva::ComBat(dat = normalized_counts_edger, batch = batch, mod = mod, par.prior = TRUE))
+  normalized_counts_edger_batch_corrected %>%
+    rownames_to_column(var = "gene") -> normalized_counts_edger_for_plots
+  normalized_counts_file_batch_corrected <- file.path(counts_dir, "edgeR_TMM_normalized_logCPM_counts_batch_corrected.tsv")
+  write.table(normalized_counts_edger_for_plots,
+              file = normalized_counts_file_batch_corrected,
+              sep = "\t",
+              quote = FALSE,
+              col.names = TRUE,
+              row.names = FALSE)
+  print(glue::glue("💾 Batch corrected normalized counts saved to: ", normalized_counts_file_batch_corrected))
+}
+
 # exit_gracefully()
 ```
 
@@ -1428,13 +1537,16 @@ print(violin_plot)
 #| fig.align: "center"
 #| warning: false
 
-
+if (isTRUE(params$usebatch)) {
+  ylabel="Normalized Counts (logCPM batch corrected)"
+} else {
+  ylabel="Normalized Counts (logCPM)"
+}
 # Create violin plot
-violin_plot <- make_violin_plot(normalized_counts,
-                                 xlab = "Sample",
-                                 ylab = "Counts (logCPM)",
-                                 title = "")
-
+violin_plot <- make_violin_plot(normalized_counts_edger_for_plots,
+                               xlab = "Sample",
+                               ylab = ylabel,
+                               title = "")
 print(violin_plot)
 ```
 
@@ -1457,7 +1569,8 @@ print(violin_plot)
 #| fig.show: "hold"
 #| warning: false
 
-pcas_before <- make_pca_plots(logcpm_before)
+pcas_before <- make_pca_plots(logcpm_before,
+                               title = "PCA Plot of Log2 Raw CPM Counts")
 pcas_before$pca2d
 
 # exit_gracefully()
@@ -1477,7 +1590,13 @@ pcas_before$pca2d
 #| fig.show: "hold"
 #| warning: false
 
-pcas_after <- make_pca_plots(normalized_counts)
+if (isTRUE(params$usebatch)) {
+  pcas_after <- make_pca_plots(normalized_counts_edger_for_plots,
+                               title = "PCA Plot of Log2 Normalized Counts (Batch corrected)")
+} else {
+  pcas_after <- make_pca_plots(normalized_counts_edger_for_plots,
+                               title = "PCA Plot of Log2 Normalized Counts")
+}
 pcas_after$pca2d
 
 # exit_gracefully()
@@ -1535,23 +1654,24 @@ pcas_after$pca3d
 ```{r deg_results_edger}
 #| code-fold: true
 #| code-summary: "🧩 Design Matrix"
+#| message: true
+#| warning: false
+#| echo: false
 
-
-samples[[params$group_column]] <- relevel(factor(samples[[params$group_column]]), ref = g2)
-# Create design matrix
-design <- model.matrix(as.formula(params$design_formula), data = samples)
-# Report design matrix  dimensions
-print(glue::glue("📊 Design matrix dimensions: ", nrow(design), " samples × ", ncol(design), " variables"))
-# Check for singularities
-if (any(is.na(design))) {
-  stop("❌ Design matrix contains NA values. Please check your samplesheet and design formula.")
+# build egder design
+if (isTRUE(params$usebatch)){
+  model_str <- paste("~",params$batch_column,"+",params$group_column)
+} else {
+  model_str <- paste("~", params$group_column)
 }
 
+edger_design <- model.matrix(as.formula(model_str), data=dge_final$samples)
+
 # Estimate dispersion
-dge_edger <- estimateDisp(dge_final, design)
+dge_edger <- estimateDisp(dge_final, edger_design)
 
 # Fit GLM and run LRT
-fit <- glmFit(dge_edger, design)
+fit <- glmFit(dge_edger, edger_design)
 lrt <- glmLRT(fit)
 
 # Extract results table
@@ -1635,6 +1755,7 @@ DT::datatable(
 #| out.height: "100%"
 #| fig.align: "center"
 #| fig.show: "hold"
+#| warning: false
 
 plotBCV(dge_edger)
 ```
@@ -1650,39 +1771,25 @@ plotBCV(dge_edger)
 #| out.height: "100%"
 #| fig.align: "center"
 #| fig.show: "hold"
+#| warning: false
+#| message: false
+#| echo: false
+
+if (isTRUE(params$usebatch)) {
+  main_title = paste("MA Plot: ",g1," vs ",g2," (Batch-corrected)")
+} else {
+  main_title = paste("MA Plot: ",g1," vs ",g2)
+}
+plotMD(lrt,
+        column = 1,  # the contrast tested
+        status = decideTests(lrt, p.value=params$fdr_threshold,lfc=params$log2FC_threshold),  # highlights significant genes
+        main = main_title,
+        xlab = "Average Log CPM",
+        ylab = "Log Fold Change",
+        cex = 0.6)
+abline(h = 0, col = "blue", lty = 2)
 
 
-# Optionally, add a significance column for coloring
-res_table_edger$Significant <- ifelse(res_table_edger$FDR < fdr_threshold, paste0("FDR < ",fdr_threshold), "Not Sig")
-
-# Interactive MA plot
-ma_plot <- plot_ly(
-  data = res_table_edger,
-  x = ~AveExpr,
-  y = ~log2FoldChange,
-  type = 'scatter',
-  mode = 'markers',
-  color = ~Significant,
-  colors = c("red", "gray"),
-  text = ~paste("Gene:", rownames(res_table_edger),
-                "<br>logFC:", round(log2FoldChange, 2),
-                "<br>FDR:", signif(FDR, 3)),
-  hoverinfo = "text"
-) %>%
-  layout(
-    title = "🧬 Interactive MA Plot",
-    xaxis = list(title = "Average logCPM"),
-    yaxis = list(title = "log2 Fold Change"),
-    shapes = list(
-      list(type = "line", x0 = min(res_table_edger$AveExpr), x1 = max(res_table_edger$AveExpr),
-           y0 = 0, y1 = 0, line = list(dash = "dash", color = "black"))
-    )
-  )
-
-# print plot
-ma_plot
-# exit_gracefully()
-# print(ma_plot)
 ```
 
 ## Volcano Plot
@@ -1709,6 +1816,8 @@ volcano_plotly <- make_volcano_plot(volcano_df,
 
 volcano_plotly
 ```
+
+
 
 # DESeq2 analysis
 
@@ -1750,9 +1859,7 @@ nercc_genes_kept <- sum(keep_genes_deseq2 & is_nonzero_ercc)
 print(glue::glue("Low-count filtering Criteria: "))
 print(glue::glue("Atleast ", params$DESeq2_low_count_group_fraction * 100, "% of samples in any group must have count > ", params$DESeq2_low_count_cutoff))
 print(glue::glue("✅ Endogenous genes after filtering: ", nendogeneous_genes_kept))
-# if (isTRUE(params$useERCC)) {
-# print(glue::glue("✅ ERCC genes after filtering low count genes for DESeq2 analysis: ", nercc_genes_kept))
-# }
+
 ```
 
 ## Normalization
@@ -1764,7 +1871,7 @@ print(glue::glue("✅ Endogenous genes after filtering: ", nendogeneous_genes_ke
 #| warning: false
 #| echo: false
 
-design_formula <- as.formula(params$design_formula)
+design_formula <- as.formula(model_str)
 dds <- DESeqDataSetFromMatrix(countData = ready_for_deg_raw_counts[keep_genes_deseq2, ], 
                               colData = samples, 
                               design = design_formula)
@@ -1777,97 +1884,6 @@ if (isTRUE(params$useERCC)) {
   dds <- estimateSizeFactors(dds)
 }
 
-# Pull normalized library size (sizeFactors) and original library size
-dds_samples_df <- as.data.frame(colData(dds)) %>%
-  rownames_to_column(var = "Sample") %>%
-  mutate(
-    Group = groupName,
-    LibrarySize = colSums(counts(dds)),
-    NormFactor = signif(sizeFactors(dds), 3)
-  ) %>%
-  dplyr::select(Sample, Group, LibrarySize, NormFactor)
-
-# Add Batch column and colors
-if (params$batch && params$batch_column %in% colnames(samples)) {
-  dds_samples_df$Batch <- selected_samples[[params$batch_column]][match(dds_samples_df$Sample, selected_samples[[params$sample_column]])]
-  dds_samples_df$Color <- group_colors[dds_samples_df$Group]
-
-  # Define shapes per batch
-  available_shapes <- c("circle", "square", "diamond", "cross", "x", 
-                        "triangle-up", "triangle-down", "triangle-left", 
-                        "triangle-right", "star")
-  batches <- unique(dds_samples_df$Batch)
-  batch_shapes <- setNames(
-    rep(available_shapes, length.out = length(batches)),
-    batches
-  )
-
-  # Base plot
-  p <- plot_ly()
-
-  # Real points (color by group, shape by batch)
-  p <- p %>% add_trace(
-    data = dds_samples_df,
-    x = ~LibrarySize,
-    y = ~NormFactor,
-    text = ~Sample,
-    type = "scatter",
-    mode = "markers",
-    marker = list(
-      color = dds_samples_df$Color,
-      symbol = unname(batch_shapes[dds_samples_df$Batch]),
-      size = 6
-    ),
-    name="", # prevents 'trace 0' from showing in hover
-    showlegend = FALSE
-  )
-
-  # Dummy points for legend (black, shape only)
-  for (b in batches) {
-    shape <- batch_shapes[b]
-    p <- p %>% add_trace(
-      x = 0, y = 0,
-      type = "scatter",
-      mode = "markers",
-      marker = list(
-        color = "black",
-        symbol = shape,
-        size = 6
-      ),
-      name = b,
-      showlegend = TRUE,
-      hoverinfo = "none",
-      legendgroup = b
-    )
-  }
-
-  # Layout
-  p <- p %>% layout(
-    title = "Library Size vs Normalization Factor (DESeq2)",
-    xaxis = list(title = "Library Size"),
-    yaxis = list(title = "Size Factor"),
-    legend = list(title = list(text = "Batch"))
-  )
-} else {
-  # Simple plot without batch encoding
-  p <- plot_ly(dds_samples_df,
-               x = ~LibrarySize,
-               y = ~NormFactor,
-               text = ~Sample,
-               color = ~Group,
-               colors = group_colors,
-               type = "scatter",
-               mode = "markers",
-               marker = list(size = 6))
-
-  p <- p %>% layout(
-    title = "Library Size vs Normalization Factor (DESeq2)",
-    xaxis = list(title = "Library Size"),
-    yaxis = list(title = "Size Factor")
-  )
-}
-
-p
 
 ```
 
@@ -1880,21 +1896,20 @@ p
 #| message: false
 #| echo: false
 
-# Extract sample info from DESeq2 object
-sample_info_deseq2 <- as.data.frame(colData(dds)) %>%
+  # Pull normalized library size (sizeFactors) and original library size
+  deseq2_sampleinfo_df <- as.data.frame(colData(dds)) %>%
   rownames_to_column(var = "Sample") %>%
   mutate(
-    Group = group,
-    LibrarySize = format(colSums(counts(dds)), big.mark = ","),
-    NormFactor = formatC(sizeFactors(dds), format = "f", digits = 3),
-    Batch = if ("Batch" %in% names(.)) Batch 
-          else if ("batch" %in% names(.)) batch 
-          else NA
+    Group = groupName,
+    LibrarySize = colSums(counts(dds)),
+    NormFactor = signif(sizeFactors(dds), 3),
+    Batch = if ("batch" %in% colnames(.)) batch else NA
   ) %>%
-  dplyr::select(Sample, Group, LibrarySize, NormFactor, Batch)
-
-DT::datatable(
-  sample_info_deseq2,
+    dplyr::select(Sample, Group, any_of("Batch"),LibrarySize, NormFactor) %>%
+    dplyr::select(where(~ !all(is.na(.))))
+  
+  DT::datatable(
+  deseq2_sampleinfo_df,
   options = list(
     pageLength = 20,
     autoWidth = TRUE,
@@ -1918,14 +1933,14 @@ vst_obj <- vst(dds, blind = TRUE)
 normalized_counts_deseq2 <- assay(vst_obj) %>% as.data.frame()
 
 # Add gene column only if not present
-normalized_counts_deseq2_for_output <- normalized_counts_deseq2 %>%
+normalized_counts_deseq2_for_plots <- normalized_counts_deseq2 %>%
   tibble::rownames_to_column(var = "gene")
 
 # Define output file path
 normalized_counts_deseq2_file <- file.path(counts_dir, "DESeq2_vst_normalized_counts.tsv")
 
 # Write to file
-write.table(normalized_counts_deseq2_for_output,
+write.table(normalized_counts_deseq2_for_plots,
             file = normalized_counts_deseq2_file,
             sep = "\t",
             quote = FALSE,
@@ -1933,6 +1948,32 @@ write.table(normalized_counts_deseq2_for_output,
             row.names = FALSE)
 
 print(glue::glue("💾 DESeq2 normalized counts saved to: {normalized_counts_deseq2_file}"))
+
+if (isTRUE(params$usebatch)){
+  
+  # Get batch and optional biological condition
+  batch <- samples[[params$batch_column]]
+  group <- samples[[params$group_column]]
+  mod <- model.matrix(~ group)  # Preserve biological signal
+  
+  # Apply ComBat on normalized VST counts
+  normalized_counts_deseq2_batch_corrected <- as.data.frame(sva::ComBat(dat = normalized_counts_deseq2, batch = batch, mod = mod, par.prior = TRUE))
+  normalized_counts_deseq2_for_plots <- normalized_counts_deseq2_batch_corrected %>%
+    tibble::rownames_to_column(var = "gene")
+  
+  # Define output file path
+  normalized_counts_deseq2_file_batch_corrected <- file.path(counts_dir, "DESeq2_vst_normalized_counts_batch_corrected.tsv")
+  
+  # Write to file
+  write.table(normalized_counts_deseq2_for_plots,
+              file = normalized_counts_deseq2_file_batch_corrected,
+              sep = "\t",
+              quote = FALSE,
+              col.names = TRUE,
+              row.names = FALSE)
+  
+  print(glue::glue("💾 DESeq2 batch corrected normalized counts saved to: {normalized_counts_deseq2_file_batch_corrected}"))
+}
 
 ```
 
@@ -1951,6 +1992,7 @@ print(glue::glue("💾 DESeq2 normalized counts saved to: {normalized_counts_des
 #| out.height: "100%"
 #| fig.align: "center"
 #| fig.show: "hold"
+#| warning: false
 
 # BEFORE normalization (raw counts)
 raw_counts <- counts(dds, normalized = FALSE)
@@ -1980,12 +2022,18 @@ print(violin_plot_deseq2)
 #| out.height: "100%"
 #| fig.align: "center"
 #| fig.show: "hold"
+#| warning: false
 
+if (isTRUE(params$usebatch)) {
+  ylabel="VST Normalized Counts (Batch corrected)"
+} else {
+  ylabel="VST Normalized Counts"
+}
 
 # Create violin plot
-violin_plot_deseq2 <- make_violin_plot(normalized_counts_deseq2,
+violin_plot_deseq2 <- make_violin_plot(normalized_counts_deseq2_for_plots,
                                         xlab = "Sample",
-                                        ylab = "VST Normalized Counts",
+                                        ylab = ylabel,
                                         title = "")
                                         
 
@@ -2032,11 +2080,16 @@ pcas_deseq2_before$pca2d
 #| fig.show: "hold"
 #| warning: false
 
-pcas_deseq2_after <- make_pca_plots(normalized_counts_deseq2)
+if (isTRUE(params$usebatch)) {
+  pcas_deseq2_after <- make_pca_plots(normalized_counts_deseq2_for_plots,
+                                       title = "PCA Plot of VST Normalized Counts (Batch corrected)")
+} else {
+  pcas_deseq2_after <- make_pca_plots(normalized_counts_deseq2_for_plots,
+                                       title = "PCA Plot of VST Normalized Counts")
+}
+
 pcas_deseq2_after$pca2d
 
-# exit_gracefully()
-# print(pca_plot)
 ```
 
 :::
@@ -2079,8 +2132,6 @@ pcas_deseq2_before$pca3d
 
 
 pcas_deseq2_after$pca3d
-# exit_gracefully()
-# print(pca_3d_plot)
 ```
 
 :::
@@ -2097,11 +2148,8 @@ pcas_deseq2_after$pca3d
 # Run DESeq2 analysis
 dds <- DESeq(dds)
 
-# Extract the variable name from formula string
-design_variable <- trimws(gsub("~", "", params$design_formula))
-
 # Construct contrast vector
-contrast_vector <- c(design_variable, g1, g2)
+contrast_vector <- c(params$group_column, g1, g2)
 
 # Run DESeq2 results with contrast
 res <- results(dds, contrast = contrast_vector)
@@ -2215,7 +2263,6 @@ volcano_plotly <- make_volcano_plot(volcano_df_deseq2,
 volcano_plotly
 ```
 
-
 # Combined DEG Results
 
 ## Results table
@@ -2227,10 +2274,7 @@ volcano_plotly
 #| warning: false
 #| echo: false
 
-as.data.frame(counts_data) %>% rownames_to_column(var = "gene") -> counts_data
-gene_annotations <- counts_data %>%
-  dplyr::select(gene, species, gene_chr, gene_start, gene_end,
-         gene_strand, gene_length_kb, gene_type)
+as.data.frame(counts_metadata) %>% rownames_to_column(var = "gene") -> gene_annotations
 
 res_table_limma <- res_table_limma %>%
   dplyr::select(gene, log2FoldChange, FoldChange, p_value, FDR, Direction, gsea_rank_score)
@@ -2240,6 +2284,27 @@ res_table_edger <- res_table_edger %>%
 
 res_table_deseq2 <- res_table_deseq2 %>%
   dplyr::select(gene, log2FoldChange, FoldChange, p_value, FDR, Direction, gsea_rank_score)
+
+# get the rnk files
+write_rnk_file <- function(res_table,rnk_filename) {
+  res_table[,c("gene","gsea_rank_score")] %>%
+    filter(!is.na(gsea_rank_score)) %>%
+    separate(gene, into = c("ensembl", "symbol"), sep = "\\|") %>%
+    mutate(ensembl = sub("\\..*", "", ensembl)) %>%
+    dplyr::select(ensembl, gsea_rank_score) %>%
+    arrange(desc(gsea_rank_score)) -> rnk
+  outfile <- file.path(rnk_filename)
+  write.table(rnk,
+            file = outfile,
+            sep = "\t",
+            quote = FALSE,
+            col.names = FALSE,
+            row.names = FALSE)
+}
+
+write_rnk_file(res_table_limma, file.path(limma_deg_dir, "limma_gsea.rnk"))
+write_rnk_file(res_table_edger, file.path(edger_deg_dir, "edgeR_gsea.rnk"))
+write_rnk_file(res_table_deseq2, file.path(deseq2_deg_dir, "DESeq2_gsea.rnk"))
 
 # Combine edgeR, DESeq2, and limma DEG results by gene
 combined_results <- res_table_edger %>%
@@ -2327,7 +2392,6 @@ venn_sets <- list(
 )
 
 # Use UpSetR for better readability with 6 sets
-library(UpSetR)
 venn_input <- fromList(venn_sets)
 UpSetR::upset(venn_input, nsets = 6, order.by = "freq", main.bar.color = "#377eb8", sets.bar.color = "#e41a1c")
 ```

@@ -1,5 +1,41 @@
 # dev version
 
+# v0.3.0
+
+### ✨ New Features
+
+- **Limma Support Added**  
+  DiffEx now supports differential expression analysis using the `limma` package, expanding beyond `edgeR` and `DESeq2`.
+
+- **Quarto Compatibility Enhancements**  
+  - Quarto `.qmd` workflows now initialize R environments via `renv` more reliably.
+  - Enhanced interactivity and reproducibility of reports.
+
+- **Reproducible Environments**
+  - Added `renv.lock`, `uv.lock`, and `environment.yaml` to support reproducible pipelines in R, Python, and Quarto.
+  - Added `.Rprofile` and `renv/activate.R` for seamless `renv` bootstrapping.
+
+- **Version Synchronization Tools**
+  - New utility `scripts/sync_version.py` syncs version between `pyproject.toml` and `__init__.py`.
+
+- **Cross-Platform CLI Support**
+  - Improved `Path.expanduser()` logic ensures user home directories work across operating systems.
+
+### 🛠 Improvements
+
+- Updated `.gitignore` to exclude:
+  - `renv/`, `python/`, `staging/`, `.mypy_cache/`, and `.pytest_cache/`.
+
+- Enhanced `README.md` with:
+  - Conda + `uv` setup instructions.
+  - Announcements for `limma` support.
+  - Clarified multi-language (R and Python) usage.
+
+### 🧪 Technical Updates
+.
+- Scripts and config files added to unify environments across R, Python, and Quarto.
+- Improved automation for environment setup and versioning.
+
 # v0.2.x
 
 ## Highlights

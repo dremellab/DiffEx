@@ -41,7 +41,7 @@ RUN conda env create -f environment.yaml && conda clean -afy
 # --------------------------------------------------
 # Install DiffEx from GitHub source
 # --------------------------------------------------
-RUN git clone https://github.com/dremellab/DiffEx.git /app/DiffEx && \
+RUN git clone --branch dev --single-branch https://github.com/dremellab/DiffEx.git /app/DiffEx && \
     /opt/conda/envs/diffex-env/bin/pip install -e /app/DiffEx
 
 # Make conda activate work in bash

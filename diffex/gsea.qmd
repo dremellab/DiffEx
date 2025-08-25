@@ -29,19 +29,15 @@ params:
 #| label: load-inputs
 #| echo: false
 #| cache: true
-library(tidyverse)
-library(fgsea)
-library(clusterProfiler)
-library(msigdbr)
-library(msigdbdf)
-library(AnnotationDbi)
-library(org.Mm.eg.db)
-library(org.Hs.eg.db)
-library(dplyr)
 suppressPackageStartupMessages({
-  library(readr)
-  library(openxlsx)
-  library(stringr)
+  library(tidyverse)       # dplyr, ggplot2, readr, stringr
+  library(fgsea)           # fast GSEA
+  library(clusterProfiler) # GSEA wrapper + visualization
+  library(msigdbr)         # MSigDB gene sets
+  library(AnnotationDbi)   # ID mapping
+  library(org.Mm.eg.db)    # Mouse annotations
+  library(org.Hs.eg.db)    # Human annotations
+  library(openxlsx)        # Excel export
 })
 
 # Load .rnk file (tab-delimited, no header)
@@ -170,11 +166,16 @@ run_gsea <- function(ranks,
     message("📂 Created output directory: ", normalizePath(output_path))
   }
   
+  if (species == "Homo sapiens") { db_species = "HS" }
+  if (species == "Mus musculus") { db_species = "MM" }
+  
   # 1. Get pathway collection
   if (!is.null(subcollection)) {
-    m_df <- msigdbr(species = species, category = collection, subcategory = subcollection)
+    # m_df <- msigdbr(species = species, db_species = db_species, collection = collection, subcollection = subcollection)
+    m_df <- msigdbr(species = species, collection = collection, subcollection = subcollection)
   } else {
-    m_df <- msigdbr(species = species, category = collection)
+    # m_df <- msigdbr(species = species, db_species = db_species, collection = collection)
+    m_df <- msigdbr(species = species, collection = collection)
   }
   
   # 2. Add jitter to avoid ties
@@ -224,6 +225,8 @@ run_gsea <- function(ranks,
   return(gseaRes)
 }
 
+# Get available collections
+avail <- msigdbr_collections()
 
 ```
 
@@ -233,8 +236,17 @@ run_gsea <- function(ranks,
 #| echo: false
 #| cache: true
 
-gseaRes <- run_gsea(ranks, species = species, collection = "H")
-dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA Hallmark pathways")
+acollection <- "H"
+# Check if it exists
+if (acollection %in% avail$gs_collection) {
+  message(sprintf("✔ '%s' is a valid MSigDB collection for this species.", acollection))
+  gseaRes <- run_gsea(ranks, species = species, collection = "H")
+  dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA Hallmark pathways")
+} else {
+  stop(sprintf("❌ '%s' is not a valid collection. Use one of: %s",
+               acollection, paste(unique(avail$gs_collection), collapse = ", ")))
+}
+
 ```
 
 ### C2: Canonical Pathways

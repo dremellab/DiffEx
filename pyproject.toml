@@ -2,7 +2,7 @@
 name = "diffex"
 version = "v0.3.0-dev"
 description = "Differential expression report generator using edgeR and Quarto"
-dependencies = ["typer==0.15.2", "pyyaml"]
+dependencies = ["typer==0.16.1", "pyyaml"]
 
 [project.scripts]
 diffex = "diffex.cli:main"

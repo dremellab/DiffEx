@@ -1,6 +1,7 @@
 import typer
 import yaml
 import shutil
+import shlex
 import os
 import subprocess
 from pathlib import Path
@@ -8,130 +9,114 @@ from typing import Dict, Any
 from inspect import Parameter, Signature
 import re
 import importlib.resources as pkg_resources
+from typing import Optional
+from importlib.resources import files as pkg_files
+
+## Hidden functions
+
+def _echo(cmd: list[str]) -> None:
+    typer.echo(f"[cmd] {shlex.join(cmd)}")
+
+def _ensure_exists(path: Path, what: str = "file") -> None:
+    if not path.exists():
+        typer.secho(f"❌ {what.capitalize()} not found: {path}", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+
+def _default_gsea_qmd() -> Path:
+    """
+    Resolve the packaged gsea.qmd inside the diffex package.
+    Expected layout: diffex/gsea.qmd (ship this file in MANIFEST.in / pyproject)
+    """
+    try:
+        qmd = pkg_files("diffex") / "gsea.qmd"
+        return Path(str(qmd))
+    except Exception:
+        # Fallback relative to this file if resources aren't packaged
+        return Path(__file__).resolve().parent / "gsea.qmd"
+
+def _run_quarto_render(
+    qmd_path: Path,
+    outdir: Path,
+    rnk: Path,
+    min_gs_size: int,
+    max_gs_size: int,
+    pvalue_cutoff: float,
+    quarto: Optional[str] = None,
+    extra_args: Optional[list[str]] = None,
+) -> None:
+    """
+    Invoke `quarto render` on the GSEA QMD, passing params via -P.
+    Ensures HTML is written to the same outdir and then lets the QMD post-process.
+    """
+    exe = quarto or shutil.which("quarto")
+    if not exe:
+        typer.secho("❌ Quarto not found on PATH. Install from https://quarto.org/", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+
+    _ensure_exists(qmd_path, "gsea qmd")
+    outdir.mkdir(parents=True, exist_ok=True)
+    _ensure_exists(rnk, "RNK file")
+
+    cmd = [
+        exe, "render", str(qmd_path),
+        "--to", "html",
+        "--output-dir", str(outdir),
+        # Pass parameters into the QMD:
+        "-P", f"rnk={rnk}",
+        "-P", f"outdir={outdir}",
+        "-P", f"minGSSize={min_gs_size}",
+        "-P", f"maxGSSize={max_gs_size}",
+        "-P", f"pvalueCutoff={pvalue_cutoff}",
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+
+    _echo(cmd)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        typer.secho(f"❌ Quarto render failed (exit {e.returncode})", fg=typer.colors.RED)
+        raise typer.Exit(code=e.returncode)
 
 app = typer.Typer()
 
-def normalize_paths(params: dict, outdir: Path) -> dict:
-    """Redirect output files to outdir; do not touch input files."""
-    output_keys = {
-        "normalized_counts_file",
-        "deg_results_file",
-    }
+# --------------------------------------------------------------------------------------
+# GSEA
+# --------------------------------------------------------------------------------------
 
-    for key in output_keys:
-        if key in params and isinstance(params[key], str):
-            params[key] = str(outdir / Path(params[key]).name)
-
-    return params
-
-def write_params_yaml(params: dict, outdir: Path) -> Path:
-    outdir.mkdir(parents=True, exist_ok=True)
-    params_path = outdir / "params_sent.yaml"
-    with open(params_path, "w") as f:
-        yaml.safe_dump(params, f)
-    print(f"📝 params.yaml written to: {params_path}")
-    return params_path
-
-def get_qmd_path() -> str:
-    with pkg_resources.path("diffex", "DiffEx.qmd") as path:
-        return str(path)
-
-def parse_qmd_params(qmd_path: str) -> Dict[str, Any]:
-    """Parse YAML `params:` block from a Quarto .qmd file."""
-    with open(qmd_path, "r") as f:
-        content = f.read()
-
-    match = re.search(r"^params:\n((?:\s{2,}.*\n)+)", content, re.MULTILINE)
-    if not match:
-        raise ValueError("Could not extract `params:` block")
-
-    params_block = "params:\n" + match.group(1)
-    parsed = yaml.safe_load(params_block)
-    return parsed.get("params", {})
-
-def run_quarto(
-    params: Dict[str, Any],
-    qmd_file: str,
-    params_path: Path,
-    outdir: Path
+@app.command("gsea")
+def gsea(
+    rnk: Path = typer.Option(..., "--rnk", help="Path to .rnk (gene\\tscore) file"),
+    outdir: Path = typer.Option(..., "--outdir", "-o", help="Output directory for results & HTML"),
+    min_gs_size: int = typer.Option(15, "--min-gs-size", help="Minimum gene set size"),
+    max_gs_size: int = typer.Option(500, "--max-gs-size", help="Maximum gene set size"),
+    pvalue_cutoff: float = typer.Option(0.05, "--pvalue-cutoff", help="P-value cutoff for filtered results"),
+    qmd: Optional[Path] = typer.Option(None, "--qmd", help="Path to gsea.qmd (defaults to packaged one)"),
+    quarto: Optional[str] = typer.Option(None, "--quarto", help="Path to Quarto executable (default: auto-detect)"),
+    pass_args: Optional[str] = typer.Option(None, "--pass-args", help='Extra args for `quarto render` (e.g. "--no-execute")'),
 ):
-    outdir.mkdir(parents=True, exist_ok=True)
+    """
+    Run the GSEA Quarto report (gsea.qmd) and expose key params at the CLI.
 
-    qmd_name = Path(qmd_file).name
-    qmd_in_outdir = outdir / qmd_name
-    shutil.copy2(qmd_file, qmd_in_outdir)
+    Example:
+        diffex gsea --rnk path/to/limma_gsea.rnk \\
+                    --outdir results/gsea \\
+                    --min-gs-size 15 --max-gs-size 500 --pvalue-cutoff 0.05
+    """
+    qmd_path = Path(qmd) if qmd else _default_gsea_qmd()
+    extras = shlex.split(pass_args) if pass_args else None
 
-    command = [
-        "quarto", "render", qmd_name,
-        "--to", "html",
-        "--no-cache",
-        "--self-contained",
-        "--execute-params", str(params_path.name)
-    ]
-
-    print(f"🚀 Running Quarto in: {outdir}")
-    subprocess.run(command, check=True, cwd=outdir.resolve())
-
-@app.command(name="run")
-def build_dynamic_render_command():
-    qmd_file = get_qmd_path()
-    param_defaults = parse_qmd_params(qmd_file)
-
-    def render(**kwargs):
-        """Run DEG analysis and generate Quarto report."""
-        outdir = kwargs.get("outdir", "results")
-        outdir_path = Path(outdir)
-        outdir_path = outdir_path.expanduser().resolve()
-
-        final_params = {
-            key: kwargs.get(key, default)
-            for key, default in param_defaults.items()
-        }
-        final_params["outdir"] = str(outdir_path)  # Add outdir explicitly to params
-
-        params_path = write_params_yaml(final_params, outdir_path)
-
-        run_quarto(
-            params=final_params,
-            qmd_file=qmd_file,
-            params_path=params_path,
-            outdir=outdir_path
-        )
-
-    parameters = [
-        Parameter(
-            name="outdir",
-            kind=Parameter.KEYWORD_ONLY,
-            default=typer.Option("results", help="Directory to store all outputs"),
-            annotation=str
-        )
-    ]
-
-    for key, default in param_defaults.items():
-        if key == "outdir":
-            continue  # prevent duplicate
-        param_type = type(default)
-        default_value = default
-        if key == "counts_file" or key == "samplesheet":
-            default_value = str(Path(default_value).expanduser().resolve())
-        parameters.append(
-            Parameter(
-                name=key,
-                kind=Parameter.KEYWORD_ONLY,
-                default=typer.Option(
-                    default_value,
-                    help=f"Quarto param: `{key}`",
-                    show_default=True
-                ),
-                annotation=param_type
-            )
-        )
-
-    render.__signature__ = Signature(parameters)
-    return render
-
-app.command(name="run")(build_dynamic_render_command())
-app.command(name="dummy")(lambda: print("Dummy command executed!"))
+    _run_quarto_render(
+        qmd_path=qmd_path,
+        outdir=outdir,
+        rnk=rnk,
+        min_gs_size=min_gs_size,
+        max_gs_size=max_gs_size,
+        pvalue_cutoff=pvalue_cutoff,
+        quarto=quarto,
+        extra_args=extras,
+    )
+    typer.secho(f"✅ GSEA report written to: {outdir}", fg=typer.colors.GREEN)
 
 @app.command(name="version")
 def version():

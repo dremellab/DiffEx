@@ -1,0 +1,526 @@
+---
+title: "GSEA analysis"
+format:
+  html:
+    theme: flatly
+    toc: true
+    toc-location: left
+    toc-depth: 4
+execute:
+  echo: false
+  warning: false
+  message: true
+params:
+  # counts_file: ".test/counts_matrix.tsv"
+  # samplesheet: ".test/samples.tsv"
+  # test dataset 2
+  
+  rnk: "~/Documents/Data/Analysis/20250423_RNAseq-1/DiffEx_results_v0.3.0/usebatch/GFP72h_vs_UT/limma_deg/limma_gsea.rnk"
+  outdir: "~/Documents/Data/Analysis/20250423_RNAseq-1/DiffEx_results_v0.3.0/usebatch/GFP72h_vs_UT/limma_deg/gsea"
+  minGSSize: 15
+  maxGSSize: 500
+  pvalueCutoff: 0.05
+  
+---
+
+## Load in inputs
+
+```{r}
+#| label: load-inputs
+#| echo: false
+#| cache: true
+library(tidyverse)
+library(fgsea)
+library(clusterProfiler)
+library(msigdbr)
+library(msigdbdf)
+library(AnnotationDbi)
+library(org.Mm.eg.db)
+library(org.Hs.eg.db)
+library(dplyr)
+suppressPackageStartupMessages({
+  library(readr)
+  library(openxlsx)
+  library(stringr)
+})
+
+# Load .rnk file (tab-delimited, no header)
+rnk <- read.table(params$rnk, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+
+# Give columns names (optional, for clarity)
+colnames(rnk) <- c("Gene", "Score")
+
+# Sort by Score descending
+rnk <- rnk[order(-rnk$Score), ]
+
+print(glue::glue("📥 RNK file path: ", params$rnk))
+
+outdir <- normalizePath(params$outdir, mustWork = FALSE)
+if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE)
+print(glue::glue("📂 Output directory: ", outdir))
+```
+
+## Run GSEA
+```{r}
+#| label: gsea-setup
+#| echo: false
+#| cache: true
+
+
+# # Function to pull ALL MSigDB gene sets for a given species
+# get_all_msigdb <- function(species = "Homo sapiens") {
+#   cats <- unique(msigdbr_collections()$gs_collection)
+#   all_sets <- list()
+#   
+#   for (cat in cats) {
+#     subcats <- unique(msigdbr_collections()$gs_subcollection[msigdbr_collections()$gs_collection == cat])
+#     
+#     if (all(is.na(subcats))) {
+#       m_df <- msigdbr(species = species, category = cat)
+#       pathways <- split(m_df$gene_symbol, m_df$gs_name)
+#       all_sets <- c(all_sets, pathways)
+#     } else {
+#       for (sc in subcats) {
+#         m_df <- msigdbr(species = species, category = cat, subcategory = sc)
+#         pathways <- split(m_df$gene_symbol, m_df$gs_name)
+#         all_sets <- c(all_sets, pathways)
+#       }
+#     }
+#   }
+#   
+#   return(all_sets)
+# }
+
+
+
+
+prepare_ranks <- function(rnk) {
+  genes <- rnk$Gene
+  
+  if (any(grepl("^ENSMUSG", genes))) {
+    message("Detected: Mouse (Ensembl IDs)")
+    species <- "Mus musculus"
+    
+    gene_map <- AnnotationDbi::select(org.Mm.eg.db,
+                                      keys = genes,
+                                      keytype = "ENSEMBL",
+                                      columns = c("SYMBOL"))
+    rnk2 <- merge(rnk, gene_map, by.x = "Gene", by.y = "ENSEMBL")
+    rnk2 <- rnk2[!is.na(rnk2$SYMBOL), ]
+    
+    rnk2 <- rnk2 %>%
+      group_by(SYMBOL) %>%
+      summarise(Score = max(Score), .groups = "drop") %>%
+      arrange(desc(Score))
+    
+    ranks <- setNames(rnk2$Score, rnk2$SYMBOL)
+    
+  } else if (any(grepl("^ENSG", genes))) {
+    message("Detected: Human (Ensembl IDs)")
+    species <- "Homo sapiens"
+    
+    gene_map <- AnnotationDbi::select(org.Hs.eg.db,
+                                      keys = genes,
+                                      keytype = "ENSEMBL",
+                                      columns = c("SYMBOL"))
+    rnk2 <- merge(rnk, gene_map, by.x = "Gene", by.y = "ENSEMBL")
+    rnk2 <- rnk2[!is.na(rnk2$SYMBOL), ]
+    
+    rnk2 <- rnk2 %>%
+      group_by(SYMBOL) %>%
+      summarise(Score = max(Score), .groups = "drop") %>%
+      arrange(desc(Score))
+    
+    ranks <- setNames(rnk2$Score, rnk2$SYMBOL)
+    
+  } else if (any(grepl("^[A-Z]{2,}", genes))) {
+    message("Detected: Human (gene symbols)")
+    species <- "Homo sapiens"
+    ranks <- setNames(rnk$Score, rnk$Gene)
+    
+  } else if (any(grepl("^[A-Z][a-z]", genes))) {
+    message("Detected: Mouse (gene symbols)")
+    species <- "Mus musculus"
+    ranks <- setNames(rnk$Score, rnk$Gene)
+    
+  } else {
+    stop("❌ Could not auto-detect species from gene IDs")
+  }
+  
+  return(list(species = species, ranks = ranks))
+}
+
+
+# pepare ranks and detect species
+prep <- prepare_ranks(rnk)
+species <- prep$species
+ranks   <- prep$ranks
+
+run_gsea <- function(ranks, 
+                     species = "Homo sapiens", 
+                     collection = "H", 
+                     subcollection = NULL,
+                     minGSSize = params$minGSSize, 
+                     maxGSSize = params$maxGSSize, 
+                     pvalueCutoff = params$pvalueCutoff,
+                     output_path = params$outdir) {
+  # 0. Ensure output directory exists
+  if (!dir.exists(output_path)) {
+    dir.create(output_path, recursive = TRUE)
+    message("📂 Created output directory: ", normalizePath(output_path))
+  }
+  
+  # 1. Get pathway collection
+  if (!is.null(subcollection)) {
+    m_df <- msigdbr(species = species, category = collection, subcategory = subcollection)
+  } else {
+    m_df <- msigdbr(species = species, category = collection)
+  }
+  
+  # 2. Add jitter to avoid ties
+  ranks_jitter <- ranks + rnorm(length(ranks), mean = 0, sd = 1e-10)
+  names(ranks_jitter) <- names(ranks)
+  
+  # 3. Sort gene list
+  geneList <- sort(ranks_jitter, decreasing = TRUE)
+  
+  # 4. Run clusterProfiler GSEA (pvalueCutoff=1 for full table)
+  gseaRes_full <- GSEA(
+    geneList      = geneList,
+    TERM2GENE     = m_df[, c("gs_name", "gene_symbol")],
+    minGSSize     = minGSSize,
+    maxGSSize     = maxGSSize,
+    pvalueCutoff  = 1,
+    verbose       = FALSE,
+    eps           = 0   # allow p-values < 1e-10
+  )
+  
+  # 5. Build safe output filename
+  if (!is.null(subcollection)) {
+    filename <- paste0(collection, "_", subcollection, ".tsv")
+  } else {
+    filename <- paste0(collection, ".tsv")
+  }
+  filename <- gsub("[^A-Za-z0-9_.-]", "_", filename)  # sanitize
+  filepath <- file.path(output_path, filename)
+  
+  # 6. Write results to TSV
+  gsea_df <- as.data.frame(gseaRes_full)
+  write.table(gsea_df, file = filepath, sep = "\t", row.names = FALSE, quote = FALSE)
+  message("✅ Full GSEA results written to: ", normalizePath(filepath))
+  
+  # 7. Re-run with actual cutoff for downstream use
+  gseaRes <- GSEA(
+    geneList      = geneList,
+    TERM2GENE     = m_df[, c("gs_name", "gene_symbol")],
+    minGSSize     = minGSSize,
+    maxGSSize     = maxGSSize,
+    pvalueCutoff  = pvalueCutoff,
+    verbose       = FALSE,
+    eps           = 0   # allow p-values < 1e-10
+  )
+  
+  # 8. Return filtered GSEA results
+  return(gseaRes)
+}
+
+
+```
+
+### Hallmark
+```{r}
+#| label: hallmark
+#| echo: false
+#| cache: true
+
+gseaRes <- run_gsea(ranks, species = species, collection = "H")
+dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA Hallmark pathways")
+```
+
+### C2: Canonical Pathways
+```{r}
+#| label: c2
+#| echo: false
+#| cache: true
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C2", subcollection = "CP")
+dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA GO Biological Process")
+```
+### C2: CP:BIOCARTA 
+```{r}
+#| label: c2_biocarta
+#| echo: false
+#| cache: true
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C2", subcollection = "CP:BIOCARTA")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA BioCarta pathways")
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+```
+### C2: CP:KEGG_LEGACY 
+```{r}
+#| label: c2_kegg_legacy
+#| echo: false
+#| cache: true
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C2", subcollection = "CP:KEGG_LEGACY")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA KEGG_LEGACY pathways")
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+```
+
+### C2: CP:KEGG_MEDICUS 
+```{r}
+#| label: c2_kegg_medicus
+#| echo: false
+#| cache: true
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C2", subcollection = "CP:KEGG_MEDICUS")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA KEGG_MEDICUS pathways")
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+```
+
+### C2: CP:REACTOME 
+```{r}
+#| label: c2_reactome
+#| echo: false
+#| cache: true
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C2", subcollection = "CP:REACTOME")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA REACTOME pathways") +
+  theme(axis.text.y = element_text(size = 6))  # smaller font
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+```
+
+### C2: CP:WIKIPATHWAYS 
+```{r}
+#| label: c2_wikipathways
+#| echo: false
+#| cache: true
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C2", subcollection = "CP:WIKIPATHWAYS")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA REACTOME pathways") +
+  theme(axis.text.y = element_text(size = 6))  # smaller font
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+```
+
+### C3: TFT:GTRD  
+```{r}
+#| label: tft_gtrd
+#| echo: false
+#| cache: true
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C3", subcollection = "TFT:GTRD")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA TFT:GTRD pathways") +
+  theme(axis.text.y = element_text(size = 6))  # smaller font
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+```
+
+### C5: GO:BP 
+```{r}
+#| label: go_bp
+#| echo: false
+#| cache: true
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C5", subcollection = "GO:BP")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA GO Biological Process pathways") +
+  theme(axis.text.y = element_text(size = 6))  # smaller font
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+```
+
+### C5: GO:CC 
+```{r}
+#| label: go_cc
+#| echo: false
+#| cache: true
+#| warning: false
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C5", subcollection = "GO:CC")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA GO Cellular Component pathways") +
+  theme(axis.text.y = element_text(size = 6))  # smaller font
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+```
+
+### C5: GO:MF 
+```{r}
+#| label: go_mf
+#| echo: false
+#| cache: true
+#| warning: false
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C5", subcollection = "GO:MF")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA GO Molecular Function pathways") +
+  theme(axis.text.y = element_text(size = 6))  # smaller font
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+```
+
+### C4: 3CA
+```{r}
+#| label: c4_3ca
+#| echo: false
+#| cache: true
+#| warning: false
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C4", subcollection = "3CA")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("Curated Cancer Cell Atlas gene sets") +
+  theme(axis.text.y = element_text(size = 6))  # smaller font
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+```
+
+### C4: CGN
+```{r}
+#| label: c4_cgn
+#| echo: false
+#| cache: true
+#| warning: false
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C4", subcollection = "CGN")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("Cancer Gene Neighborhoods gene sets") +
+  theme(axis.text.y = element_text(size = 6))  # smaller font
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+```
+
+### C4: CM
+```{r}
+#| label: c4_cm
+#| echo: false
+#| cache: true
+#| warning: false
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C4", subcollection = "CM")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("Cancer Modules gene sets") +
+  theme(axis.text.y = element_text(size = 6))  # smaller font
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+```
+
+### C6: Oncogenic Signature
+```{r}
+#| label: c6_oncogenic
+#| echo: false
+#| cache: true
+#| warning: false
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C6")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA Oncogenic Signature pathways") +
+  theme(axis.text.y = element_text(size = 6))  # smaller font
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+```
+
+### C7: IMMUNESIGDB 
+```{r}
+#| label: c7_immunesigdb
+#| echo: false
+#| cache: true
+#| warning: false
+
+gseaRes <- run_gsea(ranks, species = species, collection = "C7", subcollection = "IMMUNESIGDB")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA ImmuneSigDB pathways") +
+  theme(axis.text.y = element_text(size = 6))  # smaller font
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+```
+
+```{r}
+#| label: export-to-excel
+#| echo: false
+#| warning: false
+#| message: true
+
+
+tsv_files <- list.files(outdir, pattern = "\\.tsv$", full.names = TRUE)
+
+if (length(tsv_files) == 0) {
+  message("No TSV files found in outdir; nothing to bundle.")
+} else {
+  wb <- createWorkbook()
+
+  # Helper to create valid/unique Excel sheet names (<=31 chars)
+  make_sheet_names <- function(paths) {
+    raw <- tools::file_path_sans_ext(basename(paths))
+    # Replace illegal characters: : \ / ? * [ ]
+    cleaned <- str_replace_all(raw, "[:\\\\/\\?\\*\\[\\]]", "_")
+    # Truncate to 31 chars
+    trimmed <- substr(cleaned, 1, 31)
+
+    # Ensure uniqueness if collisions after trimming
+    seen <- list()
+    for (i in seq_along(trimmed)) {
+      nm <- trimmed[i]
+      if (is.null(seen[[nm]])) {
+        seen[[nm]] <- 1
+      } else {
+        seen[[nm]] <- seen[[nm]] + 1
+        suffix <- paste0("_", seen[[nm]])
+        # Trim further if needed to fit suffix
+        nm <- substr(nm, 1, max(0, 31 - nchar(suffix)))
+        nm <- paste0(nm, suffix)
+      }
+      trimmed[i] <- nm
+    }
+    trimmed
+  }
+
+  sheet_names <- make_sheet_names(tsv_files)
+
+  for (i in seq_along(tsv_files)) {
+    df <- suppressWarnings(
+      readr::read_tsv(tsv_files[i], show_col_types = FALSE, progress = FALSE)
+    )
+    # Write each TSV as its own sheet
+    addWorksheet(wb, sheetName = sheet_names[i])
+    writeData(wb, sheet = sheet_names[i], x = df)
+    setColWidths(wb, sheet = sheet_names[i], cols = 1:ncol(df), widths = "auto")
+  }
+
+  xlsx_path <- file.path(outdir, "GSEA_results.xlsx")
+  saveWorkbook(wb, xlsx_path, overwrite = TRUE)
+  message("📦 Excel workbook created: ", normalizePath(xlsx_path))
+
+  # If workbook exists, delete the per-collection TSVs
+  if (file.exists(xlsx_path)) {
+    unlink(tsv_files)
+    message("🧹 Deleted original TSV files.")
+  } else {
+    warning("Excel file was not created; TSVs were not deleted.")
+  }
+}
+```

@@ -481,7 +481,7 @@ if (nrow(as.data.frame(gseaRes)) != 0 ){
 tsv_files <- list.files(outdir, pattern = "\\.tsv$", full.names = TRUE)
 
 if (length(tsv_files) == 0) {
-  message("No TSV files found in outdir; nothing to bundle.")
+  print(glue::glue("No TSV files found in outdir; nothing to bundle."))
 } else {
   wb <- createWorkbook()
 
@@ -525,12 +525,12 @@ if (length(tsv_files) == 0) {
 
   xlsx_path <- file.path(outdir, "GSEA_results.xlsx")
   saveWorkbook(wb, xlsx_path, overwrite = TRUE)
-  message("📦 Excel workbook created: ", normalizePath(xlsx_path))
+  print(glue::glue("📦 Excel workbook created: ", normalizePath(xlsx_path)))
 
   # If workbook exists, delete the per-collection TSVs
   if (file.exists(xlsx_path)) {
     unlink(tsv_files)
-    message("🧹 Deleted original TSV files.")
+    print(glue::glue("🧹 Deleted original TSV files."))
   } else {
     warning("Excel file was not created; TSVs were not deleted.")
   }

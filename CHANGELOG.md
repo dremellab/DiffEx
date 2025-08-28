@@ -1,8 +1,24 @@
 # dev version
 
-# v0.3.0
+# v0.4.0
 
 ### ✨ New Features
+
+- **new `deg` and `gsea` subcommands**
+  
+  `run` command is replaced with `deg` and new `gsea` subcommand is added. Parameter parsing from python package to R/Qmd scripts is refactored completely. `gsea` subcommand takes `.rnk` file and runs `gsea` with _msigdb_ genesets using _clusterprofiler_.
+
+- **version help**
+  
+  `--version` and `--help` works with both command and subcommands.
+
+- **docker support**
+  
+  new `Dockerfile` added. Docker is built and available on [dockerhub](https://hub.docker.com/repository/docker/seqinfomics/diffex/general). 
+
+# v0.3.0
+
+
 
 - **Limma Support Added**  
   DiffEx now supports differential expression analysis using the `limma` package, expanding beyond `edgeR` and `DESeq2`.

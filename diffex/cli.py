@@ -1,4 +1,5 @@
 import typer
+import inspect
 import yaml
 import shutil
 import shlex
@@ -56,6 +57,48 @@ def _ensure_exists(path: Path, what: str = "file") -> None:
     if not path.exists():
         typer.secho(f"❌ {what.capitalize()} not found: {path}", fg=typer.colors.RED)
         raise typer.Exit(code=2)
+
+def _ensure_readable(path: Path, what: str = "file") -> None:
+    _ensure_exists(path, what)
+    if not os.access(path, os.R_OK):
+        typer.secho(f"❌ {what.capitalize()} not readable: {path}", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+
+def _ensure_writable(path: Path, what: str = "folder") -> None:
+    _ensure_exists(path, what)
+    if not os.access(path, os.W_OK):
+        typer.secho(f"❌ {what.capitalize()} not writable: {path}", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+    
+def _caller_func_name() -> str:
+    """
+    Return the name of the calling function.
+    """
+    return inspect.stack()[2].function
+
+
+def _prepare_qmd(outdir: Path, pass_args: str = None) -> tuple[Path, list[str] | None]:
+    """
+    Resolve the packaged qmd file for the calling function,
+    copy it into the output directory (overwrite), and return its path + parsed extras.
+    """
+    func_name = _caller_func_name()  # e.g., "gsea", "deg", etc.
+
+    # Ensure outdir exists and is writable
+    outdir.mkdir(parents=True, exist_ok=True)
+    _ensure_writable(outdir, "output directory")
+
+    # Resolve packaged qmd
+    pkg_qmd_path = _resolve_qmd(func_name)
+
+    # Copy into outdir using os.path.join style
+    qmd_path = Path(os.path.join(outdir, f"{func_name}.qmd"))
+    shutil.copy2(pkg_qmd_path, qmd_path)
+
+    # Parse extra args
+    extras = shlex.split(pass_args) if pass_args else None
+
+    return qmd_path, extras
 
 def _resolve_qmd(subcommand: str) -> Path:
     """
@@ -119,7 +162,22 @@ def _run_quarto_render(
         typer.secho(f"❌ Quarto render failed (exit {e.returncode})", fg=typer.colors.RED)
         raise typer.Exit(code=e.returncode)
 
-app = typer.Typer()
+app = typer.Typer(
+    add_completion=False,
+    help="DiffEx: Differential Expression Analysis Reports",
+    no_args_is_help=True,  # <--- this makes `diffex` behave like `diffex --help`
+    context_settings={"help_option_names": ["-h", "--help"]},  # <--- enable -h
+)
+
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context):
+    """
+    DiffEx CLI – differential expression and enrichment analysis.
+    """
+    if ctx.invoked_subcommand is None:
+        # Show help if no subcommand
+        typer.echo(ctx.get_help())
+        raise typer.Exit()
 
 # --------------------------------------------------------------------------------------
 # GSEA
@@ -132,8 +190,8 @@ def gsea(
     min_gs_size: int = typer.Option(15, "--min-gs-size", help="Minimum gene set size"),
     max_gs_size: int = typer.Option(500, "--max-gs-size", help="Maximum gene set size"),
     pvalue_cutoff: float = typer.Option(0.05, "--pvalue-cutoff", help="P-value cutoff for filtered results"),
-    qmd: Optional[Path] = typer.Option(None, "--qmd", help="Path to gsea.qmd (defaults to packaged one)"),
-    quarto: Optional[str] = typer.Option(None, "--quarto", help="Path to Quarto executable (default: auto-detected)"),
+    # qmd: Optional[Path] = typer.Option(None, "--qmd", help="Path to gsea.qmd (defaults to packaged one)"),
+    # quarto: Optional[str] = typer.Option(None, "--quarto", help="Path to Quarto executable (default: auto-detected)"),
     pass_args: Optional[str] = typer.Option(None, "--pass-args", help='Extra args for `quarto render` (e.g. "--no-execute")'),
     version: bool = version_option(),
 ):
@@ -145,9 +203,20 @@ def gsea(
                     --outdir results/gsea \\
                     --min-gs-size 15 --max-gs-size 500 --pvalue-cutoff 0.05
     """
-    qmd_path = Path(qmd) if qmd else _resolve_qmd("gsea")
-    extras = shlex.split(pass_args) if pass_args else None
+    # Normalize to absolute paths
+    rnk = rnk.resolve()
+    outdir = outdir.resolve()
 
+    # Ensure rnk file exists and is readable
+    _ensure_readable(rnk, "RANK file")
+    
+    # Prepare qmd
+    # 1. check if outdir exists and is writable
+    # 2. find the right packaged qmd
+    # 3. copy it into outdir
+    # 4. parse extra args
+    qmd_path, extras = _prepare_qmd(outdir, pass_args)
+    
     _run_quarto_render(
         qmd_path=qmd_path,
         outhtmldir=outdir,
@@ -189,8 +258,8 @@ def deg(
     edger_cpm_group_fraction: float = typer.Option(0.5, "--edger-cpm-group-fraction", help="edgeR CPM group fraction"),
     deseq2_low_count_cutoff: int = typer.Option(2, "--deseq2-low-count-cutoff", help="DESeq2 low-count cutoff"),
     deseq2_low_count_group_fraction: float = typer.Option(0.5, "--deseq2-low-count-group-fraction", help="DESeq2 low-count group fraction"),
-    qmd: Optional[Path] = typer.Option(None, "--qmd", help="Path to deg.qmd (defaults to packaged one)"),
-    quarto: Optional[str] = typer.Option(None, "--quarto", help="Path to Quarto executable (default: auto-detected)"),
+    # qmd: Optional[Path] = typer.Option(None, "--qmd", help="Path to deg.qmd (defaults to packaged one)"),
+    # quarto: Optional[str] = typer.Option(None, "--quarto", help="Path to Quarto executable (default: auto-detected)"),
     pass_args: Optional[str] = typer.Option(None, "--pass-args", help="Extra args for `quarto render`"),
     version: bool = version_option(),
 ):
@@ -200,8 +269,28 @@ def deg(
     Example:
         diffex deg --counts-file counts.tsv --samplesheet samples.tsv --group1 KOS --group2 Uninf -o results/deg
     """
-    qmd_path = Path(qmd) if qmd else _resolve_qmd("deg")
-    extras = shlex.split(pass_args) if pass_args else None
+
+    # Normalize to absolute paths
+    counts_file = counts_file.resolve()
+    samplesheet = samplesheet.resolve()
+    outdir = outdir.resolve()
+
+    # Ensure files exist and are readable
+    _ensure_readable(counts_file, "Counts file")
+    _ensure_readable(samplesheet, "Sample sheet")
+
+    # Validate batch/group columns if batch is used
+    if usebatch:
+        if batch_column == group_column:
+            typer.secho("❌ --batch-column cannot be the same as --group-column", fg=typer.colors.RED)
+            raise typer.Exit(code=2)
+        
+    # Prepare qmd
+    # 1. check if outdir exists and is writable
+    # 2. find the right packaged qmd
+    # 3. copy it into outdir
+    # 4. parse extra args
+    qmd_path, extras = _prepare_qmd(outdir, pass_args)
 
     _run_quarto_render(
         qmd_path=qmd_path,
@@ -247,13 +336,13 @@ def version():
     #     print("DiffEx version: Unknown")
     print(f"DiffEx version: {_get_version()}")
 
-@app.command(name="help")
-def help():
-    """Show help message."""
-    print("DiffEx CLI Help:")
-    print("  - Use `diffex run` to run the Quarto report.")
-    print("  - Use `diffex version` to check the version.")
-    print("  - Use `diffex help` to see this message.")
+# @app.command(name="help")
+# def help():
+#     """Show help message."""
+#     print("DiffEx CLI Help:")
+#     print("  - Use `diffex run` to run the Quarto report.")
+#     print("  - Use `diffex version` to check the version.")
+#     print("  - Use `diffex help` to see this message.")
 
 @app.callback()
 def _main_callback(

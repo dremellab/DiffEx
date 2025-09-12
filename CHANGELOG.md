@@ -1,5 +1,22 @@
 # dev version
 
+# v0.4.1
+
+### Changed
+
+- CLI now shows --help when run without a command (diffex no longer errors with Missing command).
+- Added -h as a shortcut for --help.
+
+### Added
+
+- New utility functions _ensure_readable and _ensure_writable for consistent file and folder checks.
+- New _caller_func_name and _prepare_qmd helpers to auto-detect the subcommand name and copy the correct packaged QMD file into the output directory.
+
+### Fixed
+
+- Output QMD files (deg.qmd, gsea.qmd) are now always overwritten in the output directory for consistent runs.
+- Improved error messages when input files or output directories are missing or not accessible.
+
 # v0.4.0
 
 ### ✨ New Features

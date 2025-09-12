@@ -256,7 +256,12 @@ if (acollection %in% avail$gs_collection) {
 #| cache: true
 
 gseaRes <- run_gsea(ranks, species = species, collection = "C2", subcollection = "CP")
-dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA GO Biological Process")
+if (nrow(as.data.frame(gseaRes)) != 0 ){
+  dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA GO Biological Process")
+} else {
+  print(glue::glue("No enrichment found!"))
+}
+
 ```
 ### C2: CP:BIOCARTA 
 ```{r}

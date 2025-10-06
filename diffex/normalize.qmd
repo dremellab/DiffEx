@@ -1,0 +1,1687 @@
+---
+title: "Create normalized counts"
+format:
+  html:
+    theme: flatly
+    toc: true
+    toc-location: left
+    toc-depth: 4
+execute:
+  echo: false
+  warning: false
+  message: true
+params:
+  counts_file: "/Users/vishal/Documents/GitRepos/DiffEx/.test/counts_matrix.tsv"
+  samplesheet: "/Users/vishal/Documents/GitRepos/DiffEx/.test/samples.tsv"
+  # test dataset 2
+  # counts_file: "/Users/vishal/Documents/Data/Analysis/20250909_RNAseq-2/DEG/counts_matrix.tsv"
+  # samplesheet: "/Users/vishal/Documents/Data/Analysis/20250909_RNAseq-2/DEG/samples.tsv"
+  useERCC: FALSE
+  ercc_mix: 1 # choices: 1, 2
+  # group1: "Lyt_DBR1"
+  # group2: "Lyt_NTC"
+  sample_column: "sampleName"
+  group_column: "groupName"
+  usebatch: FALSE
+  batch_column: "batch"
+  outdir: "/Users/vishal/Desktop/20250909_RNAseq-2/DEG/DiffEx_results/host/usebatch/Lyt_DBR1_vs_Lyt_NTC"
+  host: "Hs" # choices: "Hs", "Mm"
+  genes_selection: "host" # choices: "host", "virus", "both" # filter out genes other than this selection
+  # test dataset 1
+  # counts_file: "~/Documents/Data/Analysis/20250423_RNAseq-1/counts/counts_matrix.tsv"
+  # samplesheet: "~/Documents/Data/Analysis/20250423_RNAseq-1/counts/samples.tsv"
+  # useERCC: FALSE
+  # ercc_mix: 1 # choices: 1, 2
+  # group1: "GFP48h"
+  # group2: "UT"
+  # sample_column: "sampleName"
+  # group_column: "groupName" # DEG will always be based of this column
+  # usebatch: FALSE # use batch as covariate in design matrix
+  # batch_column: "batch"
+  # outdir: "~/Documents/Data/Analysis/20250423_RNAseq-1/DiffEx_results"
+  # host: "Mm" # choices: "Hs", "Mm"
+  # genes_selection: "host" # choices: "host", "virus", "both" # filter out genes other than this selection
+  # thresholds and cutoffs
+  # log2FC_threshold: 1.0 # use 1.0 and not 1 .. .to make it explicitly float for wrapping python package
+  # pvalue_threshold: 0.05
+  # fdr_threshold: 0.05
+  edgeR_cpm_cutoff: 0.1 # use float to make it explicitly float for wrapping python package
+  edgeR_cpm_group_fraction: 0.5
+  DESeq2_low_count_cutoff: 2
+  DESeq2_low_count_group_fraction: 0.5
+
+---
+
+# 🔬 Differential Expression Analysis
+
+This report performs standard DGE analysis using input count data, metadata, and user-defined contrasts.
+
+---
+```{r library}
+#| code-fold: true
+#| code-summary: "📦 Load Required Packages"
+suppressPackageStartupMessages({
+  library(limma)
+  library(edgeR)
+  library(DESeq2)
+  library(tibble)
+  library(readr)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(plotly)
+  library(EnhancedVolcano)
+  library(knitr)
+  library(kableExtra)
+  library(ggplotify)
+  library(ggpubr)
+  library(ggrepel)
+  library(openxlsx)
+  library(glue)
+  library(DT)
+  library(ComplexHeatmap)
+  library(clusterProfiler)
+  library(org.Hs.eg.db)
+  library(org.Mm.eg.db)
+  library(msigdbr)
+  library(UpSetR)
+  library(ggplot2)
+  library(plotly)
+  library(openxlsx)
+  library(yaml)
+  library(fs)
+  library(VennDiagram)
+  library(grid)
+  library(sva)
+  library(UpSetR)
+})
+
+exit_gracefully <- function() {
+  message("Exiting early: Debugging script intentionally halted.")
+  knitr::knit_exit()
+}
+# Paths
+output_base <- params$outdir
+# gsea_dir <- file.path(output_base, "gsea")
+
+# Create folders
+fs::dir_create(c(output_base))
+
+# write out params
+# Convert Quarto parameters (params) to a named list
+yaml_params <- as.list(params)
+
+# Write to YAML file
+yaml::write_yaml(yaml_params, file.path(output_base, "params.yaml"))
+```
+
+## Reading inputs
+
+```{r readinput}
+#| code-fold: true
+#| code-summary: "📥 Read Count Matrix and Sample Sheet"
+#| message: true
+#| warning: false
+
+print(glue::glue("📥 Reading input files: "))
+print(glue::glue(params$counts_file, " and "))
+print(glue::glue(params$samplesheet))
+
+# Read the sample sheet
+samplesheet <- params$samplesheet
+samples <- read.table(samplesheet, sep = "\t", header = TRUE, check.names = FALSE)
+keep_cols <- c(params$sample_column, params$group_column)
+if (isTRUE(params$usebatch)) {
+  keep_cols <- c(keep_cols, params$batch_column)
+  if (!params$batch_column %in% colnames(samples)) {
+    stop(glue::glue("❌ Batch column '{params$batch_column}' not found in samplesheet."))
+  }
+}
+# Find which of the required columns are actually present
+present_cols <- intersect(keep_cols, colnames(samples))
+
+# Check: all required columns must be present
+if (length(present_cols) != length(keep_cols)) {
+  missing_cols <- setdiff(keep_cols, present_cols)
+  stop("❌ The following required columns are missing from 'samples': ", paste(missing_cols, collapse = ", "))
+}
+
+
+# Read the counts matrix
+counts_data <- read.table(params$counts_file,
+                     check.names = FALSE,  # prevent automatic conversion of hyphen to dot
+                     row.names = 1, 
+                     sep = "\t", 
+                     header = TRUE)
+colnames(counts_data) <- gsub("-", "_", colnames(counts_data))
+counts_metadata <- counts_data[, c( "species", grep("^gene_", colnames(counts_data), value = TRUE))]
+sample_columns <- samples[[params$sample_column]]
+counts <- counts_data[, c(sample_columns)]
+original_counts <- counts
+
+# Report original dimensions
+print(glue::glue("📊 Counts matrix loaded: ", nrow(counts), " genes (rows) × ", ncol(counts), " samples (columns)"))
+
+counts_dir <- file.path(output_base)
+```
+
+
+
+## Filtering counts matrix by genes selection
+
+```{r genes_selection}
+#| code-fold: true
+#| code-summary: "🔍 Filter by genes_selection"
+#| message: true
+#| warning: false
+
+print(glue::glue("Genes selection: ", params$genes_selection))
+print(glue::glue("useERCC: ", params$useERCC))
+print(glue::glue("usebatch: ", params$usebatch))
+
+# Filter out genes based on the genes_selection
+if (params$genes_selection == "host") {
+  if (isTRUE(params$useERCC)) {
+    # Select only host and ERCC genes
+    if (params$host == "Hs") {
+      filtered_counts <- counts[grepl("^ENSG|^ERCC", rownames(counts)), ]
+    } else if (params$host == "Mm") {
+      filtered_counts <- counts[grepl("^ENSMUSG|^ERCC", rownames(counts)), ]
+    }
+  } else {
+    # Select only host genes no ERCC genes
+    if (params$host == "Hs") {
+      filtered_counts <- counts[grepl("^ENSG", rownames(counts)), ]
+    } else if (params$host == "Mm") {
+      filtered_counts <- counts[grepl("^ENSMUSG", rownames(counts)), ]
+    }
+  }
+  nercc_genes <- nrow(filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ])
+  print(glue::glue("🦠 Host-only genes selected: ", nrow(filtered_counts), " genes remaining (including ", nercc_genes, " ERCC genes)"))
+} else if (params$genes_selection == "virus") {
+  if (isTRUE(params$useERCC)) {
+    # Filter out host genes .. keep ERCC
+    filtered_counts <- counts[!grepl("^ENS", rownames(counts)), ]
+  } else {
+    # Filter out host genes and ERCC genes
+    filtered_counts <- counts[!grepl("^ERCC|^ENS", rownames(counts)), ]
+  }
+  nercc_genes <- nrow(filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ])
+  print(glue::glue("🦠 Virus-only genes selected: ", nrow(filtered_counts), " genes remaining (including ", nercc_genes, " ERCC genes)"))
+} else if (params$genes_selection == "both") {
+  if (!isTRUE(params$useERCC)) {
+    # Keep both host and virus genes .. remove ERCC
+    filtered_counts <- counts[grepl("^ERCC", rownames(counts)), ]
+  }
+  nercc_genes <- nrow(filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ])
+  print(glue::glue("🦠 Both host and virus genes included: ", nrow(filtered_counts), " genes remaining (including ", nercc_genes, " ERCC genes)"))
+} else {
+  stop("❌ Invalid mode selected. Choose 'host', 'virus', or 'both'.")
+}
+# Report dimensions
+print(glue::glue("📦 Filtered counts matrix: ", nrow(filtered_counts), " genes × ", ncol(filtered_counts), " samples"))
+
+counts <- filtered_counts
+ready_for_deg_raw_counts <- counts[rowSums(counts) != 0,]
+n_all_zero_genes <- nrow(counts) - nrow(ready_for_deg_raw_counts)
+if (n_all_zero_genes > 0) {
+  print(glue::glue("❌ Warning: ", n_all_zero_genes, " genes have zero counts in all samples and will be removed."))
+} else {
+  print("✅ No all-zero genes found.")
+}
+library_sizes <- colSums(ready_for_deg_raw_counts)
+
+# remove ERCCs genes which have zero reads in any sample
+is_ercc <- grepl("^ERCC", rownames(ready_for_deg_raw_counts))
+ercc_counts <- ready_for_deg_raw_counts[is_ercc, ]
+nonzero_ercc_rows <- apply(ercc_counts, 1, function(x) all(x != 0))
+is_nonzero_ercc <- rownames(ready_for_deg_raw_counts) %in% rownames(ercc_counts)[nonzero_ercc_rows]
+remove_ercc <- is_ercc & !is_nonzero_ercc
+
+# update with selected nonzero ERCC genes
+ready_for_deg_raw_counts <- ready_for_deg_raw_counts[!remove_ercc, ]
+is_ercc <- grepl("^ERCC", rownames(ready_for_deg_raw_counts))
+is_endogenous <- !is_ercc
+
+
+if (isTRUE(params$useERCC)) {
+  print(glue::glue("❌ Warning: ",sum(remove_ercc), " ERCC genes have ZERO counts in 1 or more samples and will be excluded!."))
+
+  # Check if any ERCC genes have zero counts in all samples
+  if (sum(is_nonzero_ercc) == 0) {
+    stop("❌ All ERCC genes have zero counts in all samples. Please check your data or set useERCC to FALSE.")
+  }
+  print(glue::glue("✅ ", sum(is_nonzero_ercc), " ERCC genes have non-zero counts in all samples."))
+} else {
+  # useERCC is set to FALSE
+  # Check if any ERCC genes have zero counts in all samples
+  if (sum(is_ercc) > 0) {
+    print(glue::glue("❌ ",sum(is_ercc)," ERCC genes are present but will be removed before analysis."))
+  }
+  ready_for_deg_raw_counts <- ready_for_deg_raw_counts[!is_ercc, ]
+}
+# Report dimensions
+print(glue::glue("📦 Newly filtered counts matrix: ", nrow(ready_for_deg_raw_counts), " genes × ", ncol(ready_for_deg_raw_counts), " samples"))
+```
+
+
+```{r ercc_calculations}
+#| code-fold: true
+#| code-summary: "🧬 ERCC Calculations"
+#| message: true
+#| warning: false
+#| echo: false
+
+if (isTRUE(params$useERCC)) {
+
+  # ercc_conc <- read.csv("/Users/vishal/Documents/GitRepos/DiffEx/diffex/assets/ERCC92_conc.txt", row.names = 1)
+  # TODO: make this txt file part of DiffEx package
+  # ercc_url <- "https://raw.githubusercontent.com/mschertzer/ercc_analysis/refs/heads/master/ERCC92_conc.txt"
+  ercc_url <- "https://raw.githubusercontent.com/dremellab/DiffEx/refs/heads/main/diffex/assets/ERCC92_conc.txt"
+  
+  # Read the tab-delimited ERCC file directly from GitHub
+  ercc_conc <- read.delim(ercc_url, check.names = FALSE)
+  colnames(ercc_conc) <- c("sortID",
+                           "ERCC_ID",
+                           "subgroup",
+                           "Mix1_conc",
+                           "Mix2_conc",
+                           "FC_ratio",
+                           "log2FC")
+  
+  # Filter the ERCC concentration data for the selected mix
+  if (params$ercc_mix == 1) {
+    ercc_conc <- ercc_conc[c("ERCC_ID", "Mix1_conc")]
+  } else if (params$ercc_mix == 2) {
+    ercc_conc <- ercc_conc[c("ERCC_ID", "Mix2_conc")]
+  }
+  colnames(ercc_conc) <- c("ERCC_ID", "ercc_conc")
+  # make ERCC_ID the rownames after converting hyphen to underscore
+  ercc_conc$ERCC_ID <- gsub("-", "_", ercc_conc$ERCC_ID)
+  as.data.frame(ercc_conc) %>% column_to_rownames(var = "ERCC_ID") -> ercc_conc
+  # calculated molecules from concentration
+  ercc_conc$log2molecules <- log(ercc_conc$ercc_conc / 1000 * 20 * 6.022e5,2)
+  
+  counts_df <- as.data.frame(ready_for_deg_raw_counts)
+  counts_df$gene_id <- rownames(counts_df)
+  
+  counts_data$gene_id <- rownames(counts_data)
+  
+  merged_counts <- merge(counts_df,counts_data[,c("gene_id", "gene_length_kb")], by = "gene_id")
+  as.data.frame(merged_counts) %>% column_to_rownames(var = "gene_id") -> merged_counts
+  # merged_counts now has gene_length_kb as a column
+  
+    # Identify expression-only columns
+  expr_cols <- setdiff(colnames(merged_counts), "gene_length_kb")
+  
+  # Compute RPKM
+  rpkm_counts <- sweep(merged_counts[, expr_cols], 1, merged_counts$gene_length_kb, "/")  # divide by gene length
+  rpkm_counts <- sweep(rpkm_counts, 2, library_sizes / 1e6, "/")  # divide by library size (in millions)
+
+  # Log2-transform RPKM
+  log2_rpkm_counts <- log2(rpkm_counts)
+
+  # Subset ERCC rows
+  ercc_rows <- grepl("^ERCC", rownames(log2_rpkm_counts))
+  log2_ercc_counts <- log2_rpkm_counts[ercc_rows, ]
+  
+  # Remove -Inf and NA
+  log2_ercc_counts <- log2_ercc_counts[!apply(log2_ercc_counts, 1, function(x) any(is.na(x) | is.infinite(x))), ]
+  
+  # Clean up rownames: keep only the first part before the '|'
+  rownames(log2_ercc_counts) <- sub("\\|.*", "", rownames(log2_ercc_counts))
+
+  common_erccs <- intersect(rownames(log2_ercc_counts), rownames(ercc_conc))
+  
+  counts_matched <- log2_ercc_counts[common_erccs, ]
+  # reorder ercc_conc to match counts_matched
+  ercc_conc <- ercc_conc[common_erccs, ]
+
+  # Initialize results data frame
+  ercc_qc <- data.frame(
+    Sample = colnames(counts_matched),
+    Slope = NA_real_,
+    Intercept = NA_real_,
+    Rsquared = NA_real_
+  )
+  
+  # Fit linear model per sample
+  for (s in colnames(counts_matched)) {
+    y <- counts_matched[,s] # already log2 transformed RPKM values
+    x <- ercc_conc$log2molecules
+  
+    fit <- lm(y ~ x)
+    ercc_qc[ercc_qc$Sample == s, "Slope"]     <- coef(fit)[2]
+    ercc_qc[ercc_qc$Sample == s, "Intercept"] <- coef(fit)[1]
+    ercc_qc[ercc_qc$Sample == s, "Rsquared"]  <- summary(fit)$r.squared
+  }
+
+  # Create summary table
+  ercc_norm_df <- data.frame(
+    Sample = ercc_qc$Sample,
+    Slope = format(ercc_qc$Slope, digits = 3),
+    Intercept = format(ercc_qc$Intercept, digits = 3),
+    Rsquared = format(ercc_qc$Rsquared, digits = 3)
+  )
+  
+# Implement corrected log2RPKM = (log2RPKM - intercept) / slope (per sample)
+pseudo_log2_normalized_counts <- log2_rpkm_counts
+
+for (s in colnames(pseudo_log2_normalized_counts)) {
+  intercept <- ercc_qc$Intercept[ercc_qc$Sample == s]
+  slope <- ercc_qc$Slope[ercc_qc$Sample == s]
+
+  # Sanity check
+  if (length(intercept) != 1 || length(slope) != 1) {
+    stop(glue::glue("❌ Could not uniquely match slope/intercept for sample {s}."))
+  }
+
+  # Apply transformation
+  pseudo_log2_normalized_counts[, s] <- (pseudo_log2_normalized_counts[, s] - intercept) / slope
+}
+
+  
+  pseudo_log2_normalized_counts[pseudo_log2_normalized_counts == -Inf] <- NA
+}
+
+# pseudo_log2_normalized_counts_df <- as.data.frame(pseudo_log2_normalized_counts) %>%
+#   rownames_to_column(var = "gene_id")
+# 
+# write.table(pseudo_log2_normalized_counts_df,
+#             file = file.path(output_base, "ERCC_pseudo_log2normalized_counts.tsv"),
+#             sep = "\t",
+#             quote = FALSE,
+#             col.names = TRUE,
+#             row.names = FALSE)
+
+```
+
+```{r ercc_table}
+#| code-fold: true
+#| code-summary: "📊 ERCC Summary Table"
+#| message: true
+#| warning: false
+#| echo: false
+
+if (isTRUE(params$useERCC)) {
+  DT::datatable(
+    ercc_norm_df,
+    caption = "📊 ERCC-Based Library Sizes and Intercept/Slope/R-squared",
+    rownames = FALSE,
+    options = list(pageLength = 20, autoWidth = TRUE)
+  )
+}
+```
+
+
+```{r functions}
+#| code-fold: true
+#| code-summary: "🔧 Functions"
+#| message: true
+#| warning: false
+#| echo: false
+
+# Adds a gene_id column from rownames if not already present:
+add_gene_id_column_if_missing <- function(df) {
+  if (!"gene_id" %in% colnames(df)) {
+    df$gene_id <- rownames(df)
+  }
+  return(df)
+}
+
+# Moves the gene_id column to rownames if it exists:
+set_gene_id_as_rownames_if_exists <- function(df) {
+  if ("gene_id" %in% colnames(df)) {
+    rownames(df) <- df$gene_id
+    df$gene_id <- NULL
+  }
+  return(df)
+}
+
+
+log2FC_threshold <- params$log2FC_threshold
+pvalue_threshold <- params$pvalue_threshold
+fdr_threshold <- params$fdr_threshold
+
+make_violin_plot <- function(normalized_counts,
+                             xlab = "Sample",
+                             ylab = "Normalized Counts",
+                             title = "Violin Plot of Normalized Counts by Sample") {
+
+# Prepare data
+violin_data <- as.data.frame(normalized_counts)
+
+# Remove 'gene' column if it exists
+if ("gene" %in% colnames(violin_data)) {
+  violin_data$gene <- NULL
+}
+
+# Proceed to reshape data
+violin_data <- violin_data %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "sample",
+    values_to = "normalized_counts"
+  )
+
+# violin_data$group <- selected_samples[[params$group_column]][match(violin_data$sample, selected_samples[[params$sample_column]])]
+violin_data$group <- factor(violin_data$group)
+violin_data$group <- factor(samples$groupName)
+violin_data$sample <- factor(violin_data$sample, 
+  levels = violin_data %>%
+    distinct(sample, group) %>%
+    arrange(group, sample) %>%
+    pull(sample))
+violin_data$normalized_counts <- as.numeric(violin_data$normalized_counts)
+violin_data <- violin_data %>% filter(normalized_counts > 0)
+
+# Plot
+violin_plot <- ggplot(violin_data, aes(x = sample, y = normalized_counts, fill = group)) +
+  geom_violin(scale = "width", trim = TRUE, alpha = 0.7) +
+  geom_boxplot(width = 0.1, outlier.shape = 16, outlier.size = 1, alpha = 0.5) +
+  scale_y_log10() +
+  scale_fill_manual(values = group_colors) +
+  theme_bw() +
+  labs(
+    title = title,
+    x = xlab,
+    y = ylab,
+    fill = "Group"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1),
+    legend.position = "top"
+  ) + coord_flip()
+return(violin_plot)
+}
+
+make_pca_plots <- function(normalized_counts,
+                           selected_samples,
+                           title = "PCA Plot of Normalized Counts") {
+
+  # Convert input to data frame and set rownames
+  normalized_counts <- normalized_counts %>%
+    as.data.frame() %>%
+    {
+      if ("gene" %in% colnames(.)) {
+        column_to_rownames(., var = "gene")
+      } else {
+        .
+      }
+    }
+
+  # Remove genes with zero variance
+  normalized_counts <- normalized_counts[apply(normalized_counts, 1, var) > 0, ]
+
+  # Perform PCA
+  pca <- prcomp(t(normalized_counts), center = TRUE, scale. = TRUE)
+  pca_data <- as.data.frame(pca$x)
+
+  # % Variance explained
+  pca_var <- pca$sdev^2
+  pca_var_exp <- round(100 * pca_var / sum(pca_var), 1)
+
+  # Annotate PCA metadata
+  pca_data$sample <- rownames(pca_data)
+  pca_data$group <- selected_samples[[params$group_column]][match(pca_data$sample, selected_samples[[params$sample_column]])]
+  pca_data$group <- factor(pca_data$group)
+
+  if (isTRUE(params$usebatch)) {
+    pca_data$batch <- selected_samples[[params$batch_column]][match(pca_data$sample, selected_samples[[params$sample_column]])]
+    pca_data$batch <- factor(pca_data$batch)
+  } else {
+    pca_data$batch <- NA
+  }
+
+  # Hover text for 2D
+  pca_data$hover2d <- paste0(
+    "Sample: ", pca_data$sample,
+    "<br>Group: ", pca_data$group,
+    "<br>Batch: ", pca_data$batch,
+    "<br>PC1: ", round(pca_data$PC1, 2),
+    "<br>PC2: ", round(pca_data$PC2, 2)
+  )
+
+  # Hover text for 3D
+  pca_data$hover3d <- paste0(
+    "Sample: ", pca_data$sample,
+    "<br>Group: ", pca_data$group,
+    "<br>Batch: ", pca_data$batch,
+    "<br>PC1: ", round(pca_data$PC1, 2),
+    "<br>PC2: ", round(pca_data$PC2, 2),
+    "<br>PC3: ", round(pca_data$PC3, 2)
+  )
+
+  # 2D PCA plot
+  pca2d <- plot_ly(
+    data = pca_data,
+    x = ~PC1,
+    y = ~PC2,
+    color = ~group,
+    text = ~hover2d,
+    type = 'scatter',
+    mode = 'markers',
+    symbol = if (isTRUE(params$usebatch)) ~batch else I("circle"),
+    marker = list(size = 10),
+    hoverinfo = "text"
+  ) %>%
+    layout(
+      title = title,
+      xaxis = list(title = paste0("PC1 (", pca_var_exp[1], "%)")),
+      yaxis = list(title = paste0("PC2 (", pca_var_exp[2], "%)")),
+      legend = list(
+        orientation = "v",   # vertical legend
+        x = 1.05,            # move to right outside plot
+        y = 1,
+        font = list(size = 10),
+        itemsizing = 'constant'
+      ),
+      margin = list(r = 150) # add room on right for legend
+    )
+
+
+  # 3D PCA plot
+  pca3d <- plot_ly(
+  data = pca_data,
+  x = ~PC1,
+  y = ~PC2,
+  z = ~PC3,
+  color = ~group,
+  text = ~hover3d,
+  type = "scatter3d",
+  mode = "markers",
+  symbol = if (isTRUE(params$usebatch)) ~batch else I("circle"),
+  marker = list(size = 5),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = title,
+    scene = list(
+      xaxis = list(title = paste0("PC1 (", pca_var_exp[1], "%)")),
+      yaxis = list(title = paste0("PC2 (", pca_var_exp[2], "%)")),
+      zaxis = list(title = paste0("PC3 (", pca_var_exp[3], "%)"))
+    ),
+    legend = list(
+      orientation = "v",   # vertical layout
+      x = 1.05,            # push legend to the right
+      y = 1,
+      font = list(size = 10),
+      itemsizing = 'constant'
+    ),
+    margin = list(r = 150)  # increase right margin
+  )
+
+  return(list(
+    pca2d = pca2d,
+    pca3d = pca3d
+  ))
+}
+
+
+plot_all_violin_by_group <- function(expr_df, samples_df, xlab="", ylab="",title = "Gene expression distribution") {
+  library(ggplot2)
+  library(reshape2)
+  
+  # Melt expression matrix into long format
+  df_long <- melt(expr_df, id.vars = "gene",
+                  variable.name = "sampleName", value.name = "expression")
+  
+  # Merge with sample group info
+  df_long <- merge(df_long, samples_df, by = "sampleName")
+  
+  # Create horizontal violin plot
+  p <- ggplot(df_long, aes(x = sampleName, y = expression, fill = groupName)) +
+    geom_violin(scale = "width", trim = FALSE) +
+    coord_flip() +
+    theme_bw(base_size = 14) +
+    theme(
+      axis.text.y = element_text(size = 10),
+      axis.text.x = element_text(size = 12),
+      axis.title.x = element_text(size = 14),
+      axis.title.y = element_blank(),
+      legend.title = element_blank(),
+      plot.title = element_text(hjust = 0.5, size = 16)
+    ) +
+    labs(
+      title = title,
+      x = xlab,
+      y = ylab
+    )
+  
+  return(p)
+}
+
+```
+
+
+
+# limma analysis
+
+## Normalization
+
+```{r limma}
+#| code-fold: true
+#| code-summary: "📊 Limma Analysis"
+#| message: true
+#| warning: false
+#| echo: false
+
+  group_design <- model.matrix(~ 0 + samples[[params$group_column]])
+  colnames(group_design) <- levels(samples[[params$group_column]])
+  if (isTRUE(params$usebatch)) {
+  # Convert to factors
+  samples$batch <- factor(samples$batch)
+  samples$groupName <- factor(samples$groupName)
+  
+  # Create a design matrix including both batch and group
+  limma_design <- model.matrix(~ 0 + batch + groupName, data = samples)
+  
+  # Optional: cleaner column names
+  colnames(limma_design) <- make.names(colnames(limma_design))
+  
+  # Sanity check
+  stopifnot(ncol(filtered_counts) == nrow(limma_design))
+  } else {
+    # directly use group_design
+    limma_design <- group_design
+  }
+
+
+if (isTRUE(params$useERCC)) {
+  
+  print(glue::glue("✅ ERCC standard curve slope - based normalization enabled."))
+  dims <- dim(pseudo_log2_normalized_counts)
+  
+  # get batch corrected counts
+  if (isTRUE(params$usebatch)){
+    pseudo_log2_normalized_counts_batch_corrected <- limma::removeBatchEffect(
+      pseudo_log2_normalized_counts,
+      batch = samples[[params$batch_column]],
+      design = model.matrix(~ 0 + samples[[params$group_column]])
+    )
+    pseudo_log2_normalized_counts_batch_corrected <- as.data.frame(pseudo_log2_normalized_counts_batch_corrected)
+  }
+  
+} else {
+  print(glue::glue("✅ Using Limma-voom for normalization."))
+
+  # 1. Create DGEList
+  dge <- DGEList(counts = ready_for_deg_raw_counts)
+  group <- samples[[params$group_column]]
+  dge$samples$group <- group
+  if (isTRUE(params$usebatch)) {
+    batch <- samples[[params$batch_column]]
+    dge$samples$batch <- batch
+  }
+  
+  # 2. Filtering
+  keep <- filterByExpr(dge, group = group)
+  dge <- dge[keep,, keep.lib.sizes = FALSE]
+  dge <- calcNormFactors(dge)  
+
+  # 3. Design matrix with optional batch covariate
+  # using limma_design
+  
+  # 4. Voom
+  v <- voom(dge, limma_design, plot = TRUE)
+  
+  # 5. Save log2 values
+  log2_raw_cpm <- as.data.frame(cpm(dge, log = TRUE, prior.count = 1))
+  log2_normalized_counts_limma <- as.data.frame(v$E)
+  dims <- dim(log2_normalized_counts_limma)
+  
+  if (isTRUE(params$usebatch)){
+    log2_normalized_counts_limma_batch_corrected <- limma::removeBatchEffect(
+      log2_normalized_counts_limma,
+      batch = samples[[params$batch_column]],
+      design = model.matrix(~ 0 + samples[[params$group_column]])
+    )
+    log2_normalized_counts_limma_batch_corrected <- as.data.frame(log2_normalized_counts_limma_batch_corrected)
+  }
+
+}
+
+```
+
+## Sample Info
+
+```{r limma_normfactor_table, echo=FALSE}
+#| code-fold: true
+#| code-summary: "🧬 datatable"
+#| message: true
+#| warning: false
+# Only run if normalization used ERCCs
+
+if (isTRUE(params$useERCC)) {
+  print(glue::glue("📊 log2 normalized pseudo RPKM counts matrix dimensions: {dims[1]} genes × {dims[2]} samples"))
+} else {
+  print(glue::glue("📊 log2 normalized counts matrix dimensions post filterByExpr: {dims[1]} genes × {dims[2]} samples"))
+  limma_sampleinfo_df <- as.data.frame(dge$samples) %>%
+    rownames_to_column(var = "Sample") %>%
+    mutate(
+      Group = group,
+      LibrarySize = lib.size,
+      NormFactor = signif(norm.factors, 3),
+      Batch = if ("batch" %in% colnames(.)) batch else NA
+    ) %>%
+    dplyr::select(Sample, Group, any_of("Batch"),LibrarySize, NormFactor) %>%
+    dplyr::select(where(~ !all(is.na(.))))
+  
+  DT::datatable(
+    limma_sampleinfo_df,
+    caption = "📊 Library Sizes and Normalization Factors",
+    rownames = FALSE,
+    options = list(pageLength = 20, autoWidth = TRUE)
+  )
+}
+```
+
+```{r save_limma_normalized_counts}
+#| code-fold: true
+#| code-summary: "💾 Save Normalized Counts"
+#| message: true
+#| warning: false
+
+
+if (isTRUE(params$useERCC)) {
+  normalized_counts_file <- file.path(counts_dir, "limma_log2normalized_pseudo_rpkm_counts.tsv")
+  
+    # Save normalized counts to a file
+  as.data.frame(pseudo_log2_normalized_counts) %>%
+    rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_for_output
+  write.table(pseudo_log2_normalized_counts_for_output,
+              file = normalized_counts_file,
+              sep = "\t",
+              quote = FALSE,
+              col.names = TRUE,
+              row.names = FALSE)
+  print(glue::glue("💾 Normalized counts saved to: ", normalized_counts_file))
+  
+  pseudo_rpkm_counts <- 2^pseudo_log2_normalized_counts/20000
+  pseudo_rpkm_counts[is.na(pseudo_rpkm_counts)] <- 0
+  pseudo_rpkm_counts_for_output <- as.data.frame(pseudo_rpkm_counts) %>%
+    rownames_to_column(var = "gene")
+  pseudo_rpkm_counts_file <- file.path(counts_dir, "limma_pseudo_rpkm_counts.tsv")
+  write.table(pseudo_rpkm_counts_for_output,
+              file = pseudo_rpkm_counts_file,
+              sep = "\t",
+              quote = FALSE,
+              col.names = TRUE,
+              row.names = FALSE)
+  if (isTRUE(params$usebatch)) {
+    pseudo_log2_normalized_counts_batch_corrected_file <- file.path(counts_dir, "limma_log2normalized_pseudo_rpkm_counts_batch_corrected.tsv")
+    as.data.frame(pseudo_log2_normalized_counts_batch_corrected) %>%
+      rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_batch_corrected_for_output
+    write.table(pseudo_log2_normalized_counts_batch_corrected_for_output,
+                file = pseudo_log2_normalized_counts_batch_corrected_file,
+                sep = "\t",
+                quote = FALSE,
+                col.names = TRUE,
+                row.names = FALSE)
+    print(glue::glue("💾 Batch corrected normalized counts saved to: ", pseudo_log2_normalized_counts_batch_corrected_file))
+  }
+} else {
+  normalized_counts_file <- file.path(counts_dir, "limma_voom_normalized_counts.tsv")
+  
+  as.data.frame(log2_normalized_counts_limma) %>%
+    rownames_to_column(var = "gene") -> log2_normalized_counts_limma_for_output
+  write.table(log2_normalized_counts_limma_for_output,
+              file = normalized_counts_file,
+              sep = "\t",
+              quote = FALSE,
+              col.names = TRUE,
+              row.names = FALSE)
+  print(glue::glue("💾 Normalized counts saved to: ", normalized_counts_file))
+  
+  if (isTRUE(params$usebatch)){
+    log2_normalized_counts_limma_batch_corrected_file <- file.path(counts_dir, "limma_voom_normalized_counts_batch_corrected.tsv")
+    as.data.frame(log2_normalized_counts_limma_batch_corrected) %>%
+      rownames_to_column(var = "gene") -> log2_normalized_counts_limma_batch_corrected_for_output
+    write.table(log2_normalized_counts_limma_batch_corrected_for_output,
+                file = log2_normalized_counts_limma_batch_corrected_file,
+                sep = "\t",
+                quote = FALSE,
+                col.names = TRUE,
+                row.names = FALSE)
+    print(glue::glue("💾 Batch corrected normalized counts saved to: ", log2_normalized_counts_limma_batch_corrected_file))
+  }
+
+}
+# exit_gracefully()
+```
+
+## Counts Distribution
+
+::: {.panel-tabset}
+
+### Before normalization
+```{r limma_violin_before_norm}
+#| code-fold: true
+#| code-summary: "📊 Violin Plot of Normalized Counts"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+
+if (isTRUE(params$useERCC)) {
+  log2_rpkm_counts_for_plots <- log2_rpkm_counts[!apply(log2_rpkm_counts, 1, function(x) any(is.na(x) | is.infinite(x))), ]
+as.data.frame(log2_rpkm_counts_for_plots) %>% rownames_to_column(var = "gene") -> log2_rpkm_counts_for_plots
+  violin_plot <- plot_all_violin_by_group(log2_rpkm_counts_for_plots,
+                                          as.data.frame(samples),
+                                   xlab = "Sample",
+                                   ylab = "Log2 RPKM Raw Counts")
+} else {
+  log2_raw_cpm %>% rownames_to_column(var = "gene") -> log2_raw_cpm_for_plots
+  violin_plot <- plot_all_violin_by_group(log2_raw_cpm_for_plots,
+                                          as.data.frame(samples),
+                                   xlab = "Sample",
+                                   ylab = "Log2 Raw CPM Counts",
+                                   title = "")
+}
+violin_plot
+```
+### After normalization
+```{r limma_violins}
+#| code-fold: true
+#| code-summary: "📊 Violin Plot of Normalized Counts"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+
+
+# Create violin plot of normalized counts
+if (isTRUE(params$useERCC)) {
+  if (isTRUE(params$usebatch)) {
+    pseudo_log2_normalized_counts_batch_corrected_for_plots <- pseudo_log2_normalized_counts_batch_corrected[!apply(pseudo_log2_normalized_counts_batch_corrected, 1, function(x) any(is.na(x) | is.infinite(x))), ]
+    as.data.frame(pseudo_log2_normalized_counts_batch_corrected_for_plots) %>% rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_batch_corrected_for_plots
+    ylabel <- "Log2 Normalized Pseudo RPKM Counts (Batch Corrected)"
+    violin_plot <- plot_all_violin_by_group(pseudo_log2_normalized_counts_batch_corrected_for_plots,
+                                            as.data.frame(samples),
+                                     xlab = "Sample",
+                                     ylab = ylabel,
+                                     title = "")
+  } else {
+    pseudo_log2_normalized_counts_for_plots <- pseudo_log2_normalized_counts[!apply(pseudo_log2_normalized_counts, 1, function(x) any(is.na(x) | is.infinite(x))), ]
+    as.data.frame(pseudo_log2_normalized_counts_for_plots) %>% rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_for_plots
+    ylabel <- "Log2 Normalized Pseudo RPKM Counts"
+    violin_plot <- plot_all_violin_by_group(pseudo_log2_normalized_counts_for_plots,
+                                    as.data.frame(samples),
+                                     xlab = "Sample",
+                                     ylab = ylabel,
+                                     title = "")
+  }
+} else {
+  if (isTRUE(params$usebatch)) {
+    log2_normalized_counts_limma_batch_corrected %>% rownames_to_column(var = "gene") -> log2_normalized_counts_limma_batch_corrected_for_plots
+    ylabel <- "Log2 Normalized Counts (Batch Corrected)"
+    violin_plot <- plot_all_violin_by_group(log2_normalized_counts_limma_batch_corrected_for_plots,
+                                    as.data.frame(samples),
+                               xlab = "Sample",
+                               ylab = ylabel,
+                               title = "")
+
+  } else {
+    log2_normalized_counts_limma %>% rownames_to_column(var = "gene") -> log2_normalized_counts_limma_for_plots
+    ylabel <- "Log2 Normalized Counts"
+    violin_plot <- plot_all_violin_by_group(log2_normalized_counts_limma_for_plots,
+                                    as.data.frame(samples),
+                                 xlab = "Sample",
+                                 ylab = ylabel,
+                                 title = "")
+  }
+}
+violin_plot
+```
+:::
+
+## 2-D PCA plot
+
+::: {.panel-tabset}
+
+### Before normalization
+
+```{r plot_pca_before_limma}
+#| code-fold: true
+#| code-summary: "🧬 PCA Plot with Group Colors and Variance Labels"
+#| fig.width: 8
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+if (isTRUE(params$useERCC)) {
+  pcas_before <- make_pca_plots(log2_rpkm_counts_for_plots,
+                                as.data.frame(samples),
+                               title = "PCA Plot of Log2 RPKM Counts")
+} else {
+pcas_before <- make_pca_plots(log2_raw_cpm_for_plots,
+                              as.data.frame(samples),
+                               title = "PCA Plot of Log2 Raw CPM Counts")
+}
+
+pcas_before$pca2d
+
+# exit_gracefully()
+# print(pca_plot)
+```
+
+### After normalization
+
+```{r plot_pca_after_limma}
+#| code-fold: true
+#| code-summary: "🧬 PCA Plot with Group Colors and Variance Labels"
+#| fig.width: 8
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+if (isTRUE(params$useERCC)) {
+    if (isTRUE(params$usebatch)) {
+    pcas_after <- make_pca_plots(pseudo_log2_normalized_counts_batch_corrected_for_plots,
+                                 as.data.frame(samples),
+                               title = "PCA Plot of Log2 Normalized Pseudo RPKM Counts (Batch corrected)")
+  } else {
+    pcas_after <- make_pca_plots(pseudo_log2_normalized_counts_for_plots,as.data.frame(samples),
+                               title = "PCA Plot of Log2 Normalized Pseudo RPKM Counts")
+  }  
+} else {
+    if (isTRUE(params$usebatch)) {
+    pcas_after <- make_pca_plots(log2_normalized_counts_limma_batch_corrected_for_plots,as.data.frame(samples),
+                               title = "PCA Plot of voom Normalized Counts (Batch corrected)")
+  } else {
+    pcas_after <- make_pca_plots(log2_normalized_counts_limma_for_plots,as.data.frame(samples),
+                               title = "PCA Plot of voom Normalized Counts")
+  }
+}
+pcas_after$pca2d
+```
+
+:::
+
+## 3-D PCA plot
+
+::: {.panel-tabset}
+
+### Before normalization
+
+```{r plot_3dpca_before_limma}
+#| code-fold: true
+#| code-summary: "🧬 PCA Plot with Group Colors and Variance Labels"
+#| fig.width: 8
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+pcas_before$pca3d
+
+# exit_gracefully()
+# print(pca_plot)
+```
+
+### After normalization
+
+```{r plot_3dpca_after_limma}
+#| code-fold: true
+#| code-summary: "🧬 PCA Plot with Group Colors and Variance Labels"
+#| fig.width: 8
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+pcas_after$pca3d
+
+# exit_gracefully()
+# print(pca_plot)
+```
+
+:::
+
+
+# edgeR analysis
+
+## CPM Filtering
+
+```{r cpmfilter}
+#| code-fold: true
+#| code-summary: "🔍 CPM Filtering for edgeR"
+#| message: true
+#| warning: false
+
+if (isTRUE(params$useERCC)) {
+  ready_for_deg_raw_counts <- round(pseudo_rpkm_counts)
+}
+
+dge_edger <- DGEList(counts = ready_for_deg_raw_counts, samples = samples, group = samples[[params$group_column]])
+
+cpm_mat <- cpm(dge_edger, log = FALSE)
+group <- dge_edger$samples$group
+keep_genes <- apply(cpm_mat, 1, function(row) {
+  by_group <- split(row, group)
+  group_pass <- sapply(by_group, function(vals) {
+    mean(vals > params$edgeR_cpm_cutoff) >= params$edgeR_cpm_group_fraction
+  })
+  any(group_pass)
+})
+
+dge_filtered <- dge_edger[keep_genes, , keep.lib.sizes = FALSE]
+
+ercc_genes_kept <- grepl("^ERCC",rownames(dge_filtered))
+nercc_genes_kept <- sum(ercc_genes_kept)
+nendogenous_genes_kept <- sum(keep_genes) - nercc_genes_kept
+
+print(glue::glue("CPM filtering Criteria: "))
+print(glue::glue("Atleast ", params$edgeR_cpm_group_fraction * 100, "% of samples in any group must have CPM > ", params$edgeR_cpm_cutoff))
+print(glue::glue("🔍 Endogenous genes after filtering: ", nendogenous_genes_kept))
+print(glue::glue("🔍 ERCC genes after filtering: ", nercc_genes_kept))
+
+# exit_gracefully()
+```
+
+## Apply Normalization
+
+```{r setup_edger}
+#| code-fold: true
+#| code-summary: "🧬 Set up DGE object"
+#| message: true
+#| warning: false
+
+dge_final <- dge_filtered
+dge_final <- calcNormFactors(dge_filtered)
+
+if (isTRUE(params$useERCC)) {
+  print(glue::glue("✅ Using ERCC-normalized pseudo RPKM counts from limma analysis."))
+  dge_final$samples$norm.factors <- rep(1, ncol(dge_final))
+} else {
+  print(glue::glue("ℹ️ Using TMM normalization."))
+}
+```
+
+## Sample Info
+
+```{r edger_normfactor_table, echo=FALSE}
+#| code-fold: true
+#| code-summary: "🧬 ERCC datatable"
+#| message: true
+#| warning: false
+# Only run if normalization used ERCCs
+
+  edger_sampleinfo_df <- as.data.frame(dge_final$samples) %>%
+      rownames_to_column(var = "Sample") %>%
+      mutate(
+        Group = group,
+        LibrarySize = lib.size,
+        NormFactor = signif(norm.factors, 3),
+        Batch = if ("batch" %in% colnames(.)) batch else NA
+  ) %>%
+    dplyr::select(Sample, Group, any_of("Batch"),LibrarySize, NormFactor) %>%
+    dplyr::select(where(~ !all(is.na(.))))
+  
+  DT::datatable(
+    edger_sampleinfo_df,
+    caption = "📊 Library Sizes and Normalization Factors",
+    rownames = FALSE,
+    options = list(pageLength = 20, autoWidth = TRUE)
+  )
+```
+
+```{r edger_save_normalized_counts}
+#| code-fold: true
+#| code-summary: "💾 Save Normalized Counts"
+#| message: true
+#| warning: false
+# Save normalized counts to a file
+normalized_counts_edger <- as.data.frame(cpm(dge_final, normalized.lib.sizes = TRUE, log = TRUE))
+normalized_counts_edger %>%
+  rownames_to_column(var = "gene") -> normalized_counts_edger_for_plots
+normalized_counts_file <- file.path(counts_dir, "edgeR_TMM_normalized_logCPM_counts.tsv")
+write.table(normalized_counts_edger_for_plots,
+            file = normalized_counts_file,
+            sep = "\t",
+            quote = FALSE,
+            col.names = TRUE,
+            row.names = FALSE)
+print(glue::glue("💾 Normalized counts saved to: ", normalized_counts_file))
+
+if (isTRUE(params$usebatch)) {
+
+  # Get batch and optional biological condition
+  batch <- samples[[params$batch_column]]
+  group <- samples[[params$group_column]]
+  mod <- model.matrix(~ group)  # Preserve biological signal
+  
+  batch_counts <- table(batch)
+  batch_group_counts <- table(batch, group)
+  
+  if (any(batch_counts < 2) || any(batch_group_counts < 2)) {
+    print(glue::glue("⚠️ Warning: Some batches or batch-group combinations have less than 2 samples. ComBat cannot be run."))
+  } else {
+  
+  # Apply ComBat on normalized logCPM
+  normalized_counts_edger_batch_corrected <- as.data.frame(sva::ComBat(dat = normalized_counts_edger, batch = batch, mod = mod, par.prior = TRUE))
+  normalized_counts_edger_batch_corrected %>%
+    rownames_to_column(var = "gene") -> normalized_counts_edger_for_plots
+  normalized_counts_file_batch_corrected <- file.path(counts_dir, "edgeR_TMM_normalized_logCPM_counts_batch_corrected.tsv")
+  write.table(normalized_counts_edger_for_plots,
+              file = normalized_counts_file_batch_corrected,
+              sep = "\t",
+              quote = FALSE,
+              col.names = TRUE,
+              row.names = FALSE)
+  print(glue::glue("💾 Batch corrected normalized counts saved to: ", normalized_counts_file_batch_corrected))
+  }
+}
+
+# exit_gracefully()
+```
+
+## Counts Distribution
+
+::: {.panel-tabset}
+
+### Before normalization
+
+```{r violin_before}
+#| code-fold: true
+#| code-summary: "🎻 Violin Plot of Raw Counts by Sample (Colored by Group)"
+#| fig.width: 10
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| warning: false
+
+
+# Before normalization (assumes raw counts, norm.factors = 1)
+dge_raw <- dge_final
+dge_raw$samples$norm.factors <- 1
+logcpm_before <- cpm(dge_raw, log = TRUE)
+logcpm_before <- logcpm_before %>% as.data.frame() %>% tibble::rownames_to_column("gene")
+
+# Create violin plot
+violin_plot <- plot_all_violin_by_group(logcpm_before,
+                                 as.data.frame(samples),
+                                 xlab = "Sample",
+                                 ylab = "Counts (logCPM)",
+                                 title = "")
+
+print(violin_plot)
+# exit_gracefully()
+```
+
+### After Normalization
+
+```{r violin_after}
+#| code-fold: true
+#| code-summary: "🎻 Violin Plot of Raw Counts by Sample (Colored by Group)"
+#| fig.width: 10
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| warning: false
+
+if (isTRUE(params$usebatch)) {
+  ylabel="Normalized Counts (logCPM batch corrected)"
+} else {
+  ylabel="Normalized Counts (logCPM)"
+}
+# Create violin plot
+violin_plot <- plot_all_violin_by_group(normalized_counts_edger_for_plots,
+                                        as.data.frame(samples),
+                               xlab = "Sample",
+                               ylab = ylabel,
+                               title = "")
+print(violin_plot)
+```
+
+:::
+
+## 2-D PCA plot
+
+::: {.panel-tabset}
+
+### Before normalization
+
+```{r edger_plot_pca_before}
+#| code-fold: true
+#| code-summary: "🧬 PCA Plot with Group Colors and Variance Labels"
+#| fig.width: 8
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+pcas_before <- make_pca_plots(logcpm_before,
+                             as.data.frame(samples),
+                               title = "PCA Plot of Log2 Raw CPM Counts")
+pcas_before$pca2d
+
+# exit_gracefully()
+# print(pca_plot)
+```
+
+### After normalization
+
+```{r edger_plot_pca_after}
+#| code-fold: true
+#| code-summary: "🧬 PCA Plot with Group Colors and Variance Labels"
+#| fig.width: 8
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+if (isTRUE(params$usebatch)) {
+  pcas_after <- make_pca_plots(normalized_counts_edger_for_plots,
+                               as.data.frame(samples),
+                               title = "PCA Plot of Log2 Normalized Counts (Batch corrected)")
+} else {
+  pcas_after <- make_pca_plots(normalized_counts_edger_for_plots,
+                               as.data.frame(samples),
+                               title = "PCA Plot of Log2 Normalized Counts")
+}
+pcas_after$pca2d
+
+# exit_gracefully()
+# print(pca_plot)
+```
+
+:::
+
+## 3-D PCA plot
+
+:::{.panel-tabset}
+
+### Before normalization
+
+```{r plot_pca_3d_before}
+#| code-fold: true
+#| code-summary: "🧬 3D PCA Plot"
+#| fig.width: 8
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+
+pcas_before$pca3d
+# exit_gracefully()
+# print(pca_3d_plot)
+```
+
+### After normalization
+
+```{r plot_pca_3d_after}
+#| code-fold: true
+#| code-summary: "🧬 3D PCA Plot"
+#| fig.width: 8
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+
+pcas_after$pca3d
+# exit_gracefully()
+# print(pca_3d_plot)
+```
+
+:::
+
+
+# DESeq2 analysis
+
+## Low-count filtering
+
+```{r deseq2_lowcountfiltering}
+#| code-fold: true
+#| code-summary: "🧬 Low count filtering"
+#| message: true
+#| warning: false
+#| echo: false
+
+
+# get original filtered counts
+if (isTRUE(params$useERCC)) {
+  ready_for_deg_raw_counts <- round(pseudo_rpkm_counts)
+} 
+
+is_ercc <- grepl("^ERCC", rownames(ready_for_deg_raw_counts))
+is_endogenous <- !is_ercc
+is_nonzero_ercc <- is_ercc & (rowSums(ready_for_deg_raw_counts) > 0)
+
+group <- samples[[params$group_column]]
+
+keep_genes_deseq2 <- apply(ready_for_deg_raw_counts, 1, function(row) {
+  by_group <- split(row, group)
+  group_pass <- sapply(by_group, function(vals) {
+    mean(vals > params$DESeq2_low_count_cutoff) >= params$DESeq2_low_count_group_fraction
+  })
+  any(group_pass)
+})
+
+if (isTRUE(params$useERCC)) {
+  keep_genes_deseq2 <- keep_genes_deseq2 | is_nonzero_ercc
+}
+
+nendogeneous_genes_kept <- sum(keep_genes_deseq2 & is_endogenous)
+nercc_genes_kept <- sum(keep_genes_deseq2 & is_nonzero_ercc)
+print(glue::glue("Low-count filtering Criteria: "))
+print(glue::glue("Atleast ", params$DESeq2_low_count_group_fraction * 100, "% of samples in any group must have count > ", params$DESeq2_low_count_cutoff))
+print(glue::glue("✅ Endogenous genes after filtering: ", nendogeneous_genes_kept))
+
+```
+
+## Normalization
+
+```{r deseq2_normalization}
+#| code-fold: true
+#| code-summary: "🧬 DESEq2 Normalization"
+#| message: true
+#| warning: false
+#| echo: false
+
+# build egder design
+if (isTRUE(params$usebatch)){
+  model_str <- paste("~",params$batch_column,"+",params$group_column)
+} else {
+  model_str <- paste("~", params$group_column)
+}
+design_formula <- as.formula(model_str)
+dds <- DESeqDataSetFromMatrix(countData = ready_for_deg_raw_counts[keep_genes_deseq2, ], 
+                              colData = samples, 
+                              design = design_formula)
+
+if (isTRUE(params$useERCC)) {
+  print(glue("🧪 ERCC slope based normalization will be applied"))
+  sizeFactors(dds) <- rep(1, ncol(dds))
+} else {
+  print(glue("📏 Default DESeq2 size factor normalization"))
+  dds <- estimateSizeFactors(dds)
+}
+
+
+```
+
+## Sample Info
+
+```{r deseq2_sampleinfo}
+#| code-fold: true
+#| code-summary: "📋 DESeq2 Sample Metadata with Library Sizes and Norm Factors"
+#| warning: false
+#| message: false
+#| echo: false
+
+  # Pull normalized library size (sizeFactors) and original library size
+  deseq2_sampleinfo_df <- as.data.frame(colData(dds)) %>%
+  rownames_to_column(var = "Sample") %>%
+  mutate(
+    Group = groupName,
+    LibrarySize = colSums(counts(dds)),
+    NormFactor = signif(sizeFactors(dds), 3),
+    Batch = if ("batch" %in% colnames(.)) batch else NA
+  ) %>%
+    dplyr::select(Sample, Group, any_of("Batch"),LibrarySize, NormFactor) %>%
+    dplyr::select(where(~ !all(is.na(.))))
+  
+  DT::datatable(
+  deseq2_sampleinfo_df,
+  options = list(
+    pageLength = 20,
+    autoWidth = TRUE,
+    columnDefs = list(list(className = 'dt-center', targets = "_all"))
+  ),
+  rownames = FALSE
+)
+# exit_gracefully()
+```
+
+```{r save_deseq2_normalized_counts}
+#| code-fold: true
+#| code-summary: "💾 Save DESeq2 Normalized Counts"
+#| message: true
+#| warning: false
+#| echo: false
+
+
+# Run VST and extract assay
+vst_obj <- vst(dds, blind = TRUE)
+normalized_counts_deseq2 <- assay(vst_obj) %>% as.data.frame()
+
+# Add gene column only if not present
+normalized_counts_deseq2_for_plots <- normalized_counts_deseq2 %>%
+  tibble::rownames_to_column(var = "gene")
+
+# Define output file path
+normalized_counts_deseq2_file <- file.path(counts_dir, "DESeq2_vst_normalized_counts.tsv")
+
+# Write to file
+write.table(normalized_counts_deseq2_for_plots,
+            file = normalized_counts_deseq2_file,
+            sep = "\t",
+            quote = FALSE,
+            col.names = TRUE,
+            row.names = FALSE)
+
+print(glue::glue("💾 DESeq2 normalized counts saved to: {normalized_counts_deseq2_file}"))
+
+if (isTRUE(params$usebatch)){
+  
+  # Get batch and optional biological condition
+  batch <- samples[[params$batch_column]]
+  group <- samples[[params$group_column]]
+  mod <- model.matrix(~ group)  # Preserve biological signal
+
+  batch_counts <- table(batch)
+  batch_group_counts <- table(batch, group)
+  
+  if (any(batch_counts < 2) || any(batch_group_counts < 2)) {
+    print(glue::glue("⚠️ Warning: Some batches or batch-group combinations have less than 2 samples. ComBat cannot be run."))
+  } else {
+  
+  # Apply ComBat on normalized VST counts
+  normalized_counts_deseq2_batch_corrected <- as.data.frame(sva::ComBat(dat = normalized_counts_deseq2, batch = batch, mod = mod, par.prior = TRUE))
+  normalized_counts_deseq2_for_plots <- normalized_counts_deseq2_batch_corrected %>%
+    tibble::rownames_to_column(var = "gene")
+  
+  # Define output file path
+  normalized_counts_deseq2_file_batch_corrected <- file.path(counts_dir, "DESeq2_vst_normalized_counts_batch_corrected.tsv")
+  
+  # Write to file
+  write.table(normalized_counts_deseq2_for_plots,
+              file = normalized_counts_deseq2_file_batch_corrected,
+              sep = "\t",
+              quote = FALSE,
+              col.names = TRUE,
+              row.names = FALSE)
+  
+  print(glue::glue("💾 DESeq2 batch corrected normalized counts saved to: {normalized_counts_deseq2_file_batch_corrected}"))
+  }
+}
+
+```
+
+## Counts Distribution
+
+:::{.panel-tabset}
+
+### Before normalization
+
+```{r violin_deseq2_before}
+#| code-fold: true
+#| code-summary: "🎻 Violin Plot of Raw Counts by Sample (Colored by Group)"
+#| fig.width: 10
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+# BEFORE normalization (raw counts)
+raw_counts <- counts(dds, normalized = FALSE)
+logcounts_before <- log2(raw_counts + 1)
+logcounts_before_df <- as.data.frame(logcounts_before) %>% tibble::rownames_to_column("gene")
+
+
+# Create violin plot
+violin_plot_deseq2 <- plot_all_violin_by_group(logcounts_before_df,
+                                               as.data.frame(samples),
+                                        xlab = "Sample",
+                                        ylab = "Raw Counts(log2)",
+                                        title = "")
+                                        
+
+print(violin_plot_deseq2)
+# exit_gracefully()                            
+```
+
+### After normalization
+
+```{r violin_deseq2_after}
+#| code-fold: true
+#| code-summary: "🎻 Violin Plot of VST Counts by Sample (Colored by Group)"
+#| fig.width: 10
+#| fig.height: 10
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+if (isTRUE(params$usebatch)) {
+  ylabel="VST Normalized Counts (Batch corrected)"
+} else {
+  ylabel="VST Normalized Counts"
+}
+
+# Create violin plot
+violin_plot_deseq2 <- plot_all_violin_by_group(normalized_counts_deseq2_for_plots,
+                                       as.data.frame(samples),
+                                        xlab = "Sample",
+                                        ylab = ylabel,
+                                        title = "")
+                                        
+
+print(violin_plot_deseq2)
+# exit_gracefully()                            
+```
+
+:::
+
+## 2-D PCA plot
+
+::: {.panel-tabset}
+
+### Before normalization
+
+```{r plot_pca_plotly_deseq2_before}
+#| code-fold: true
+#| code-summary: "🧬 PCA Plot with Group Colors and Variance Labels"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+pcas_deseq2_before <- make_pca_plots(logcounts_before_df,as.data.frame(samples),
+                                     title = "PCA Plot of Log2 Raw Counts")
+pcas_deseq2_before$pca2d
+
+# exit_gracefully()
+# print(pca_plot)
+```
+
+### After normalization
+
+```{r plot_pca_plotly_deseq2_after}
+#| code-fold: true
+#| code-summary: "🧬 PCA Plot with Group Colors and Variance Labels"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+if (isTRUE(params$usebatch)) {
+  pcas_deseq2_after <- make_pca_plots(normalized_counts_deseq2_for_plots,as.data.frame(samples),
+                                       title = "PCA Plot of VST Normalized Counts (Batch corrected)")
+} else {
+  pcas_deseq2_after <- make_pca_plots(normalized_counts_deseq2_for_plots,as.data.frame(samples),
+                                       title = "PCA Plot of VST Normalized Counts")
+}
+
+pcas_deseq2_after$pca2d
+
+```
+
+:::
+
+## 3-D PCA plot
+
+::: {.panel-tabset}
+
+### Before normalization
+
+```{r plot_pca_3d_plotly_deseq2_before}
+#| code-fold: true
+#| code-summary: "🧬 3D PCA Plot"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+
+pcas_deseq2_before$pca3d
+# exit_gracefully()
+# print(pca_3d_plot)
+```
+
+### After normalization
+
+```{r plot_pca_3d_plotly_deseq2_after}
+#| code-fold: true
+#| code-summary: "🧬 3D PCA Plot"
+#| fig.width: 8
+#| fig.height: 6
+#| out.width: "100%"
+#| out.height: "100%"
+#| fig.align: "center"
+#| fig.show: "hold"
+#| warning: false
+
+
+pcas_deseq2_after$pca3d
+```
+
+:::
+
+

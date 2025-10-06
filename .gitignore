@@ -18,3 +18,4 @@ results*/
 renv/library/
 renv/python/
 renv/staging/
+.Rhistory

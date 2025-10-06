@@ -196,7 +196,7 @@ def gsea(
     version: bool = version_option(),
 ):
     """
-    Run the GSEA Quarto report (gsea.qmd) and expose key params at the CLI.
+    Run the GSEA Quarto report (gsea.qmd)
 
     Example:
         diffex gsea --rnk path/to/limma_gsea.rnk \\
@@ -250,7 +250,7 @@ def deg(
     batch_column: str = typer.Option("batch", "--batch-column", help="Column for batch information"),
     outdir: Path = typer.Option(..., "--outdir", "-o", help="Output directory"),
     host: str = typer.Option("Hs", "--host", help='Host species: "Hs" or "Mm"'),
-    genes_selection: str = typer.Option("host", "--genes-selection", help='Filter genes: "host", "virus", or "both"'),
+    genes_selection: str = typer.Option("both", "--genes-selection", help='Filter genes: "host", "virus", or "both"'),
     log2fc_threshold: float = typer.Option(1.0, "--log2fc-threshold", help="Log2 fold-change threshold"),
     pvalue_threshold: float = typer.Option(0.05, "--pvalue-threshold", help="Raw p-value cutoff"),
     fdr_threshold: float = typer.Option(0.05, "--fdr-threshold", help="FDR cutoff"),
@@ -264,7 +264,7 @@ def deg(
     version: bool = version_option(),
 ):
     """
-    Run the DEG Quarto report (deg.qmd) and expose YAML params at the CLI.
+    Run the DEG Quarto report (deg.qmd)
 
     Example:
         diffex deg --counts-file counts.tsv --samplesheet samples.tsv --group1 KOS --group2 Uninf -o results/deg
@@ -320,6 +320,83 @@ def deg(
     )
 
     typer.secho(f"✅ DEG report written to: {outdir}", fg=typer.colors.GREEN)
+
+# --------------------------------------------------------------------------------------
+# Normalize: output normalized counts only
+# --------------------------------------------------------------------------------------
+
+@app.command("normalize")
+def normalize(
+    counts_file: Path = typer.Option(..., "--counts-file", "-c", help="Counts matrix file (TSV)"),
+    samplesheet: Path = typer.Option(..., "--samplesheet", "-s", help="Sample sheet TSV/CSV"),
+    use_ercc: bool = typer.Option(False, "--use-ercc", help="Whether to use ERCC spike-ins"),
+    ercc_mix: int = typer.Option(1, "--ercc-mix", help="ERCC mix (1 or 2)"),
+    sample_column: str = typer.Option("sampleName", "--sample-column", help="Column in sample sheet for sample IDs"),
+    group_column: str = typer.Option("groupName", "--group-column", help="Column for grouping factor"),
+    usebatch: bool = typer.Option(False, "--use-batch", help="Whether to use batch as covariate"),
+    batch_column: str = typer.Option("batch", "--batch-column", help="Column for batch information"),
+    outdir: Path = typer.Option(..., "--outdir", "-o", help="Output directory"),
+    host: str = typer.Option("Hs", "--host", help='Host species: "Hs" or "Mm"'),
+    genes_selection: str = typer.Option("host", "--genes-selection", help='Filter genes: "host", "virus", or "both"'),
+    edger_cpm_cutoff: float = typer.Option(0.1, "--edger-cpm-cutoff", help="edgeR CPM cutoff"),
+    edger_cpm_group_fraction: float = typer.Option(0.5, "--edger-cpm-group-fraction", help="edgeR CPM group fraction"),
+    deseq2_low_count_cutoff: int = typer.Option(2, "--deseq2-low-count-cutoff", help="DESeq2 low-count cutoff"),
+    deseq2_low_count_group_fraction: float = typer.Option(0.5, "--deseq2-low-count-group-fraction", help="DESeq2 low-count group fraction"),
+    pass_args: Optional[str] = typer.Option(None, "--pass-args", help="Extra args for `quarto render`"),
+    version: bool = version_option(),
+):
+    """
+    Run the normalization Quarto report (normalize.qmd) and output normalized counts only.
+
+    Example:
+        diffex normalize --counts-file counts.tsv --samplesheet samples.tsv -o results/norm
+    """
+
+    # Normalize to absolute paths
+    counts_file = counts_file.resolve()
+    samplesheet = samplesheet.resolve()
+    outdir = outdir.resolve()
+
+    # Ensure files exist and are readable
+    _ensure_readable(counts_file, "Counts file")
+    _ensure_readable(samplesheet, "Sample sheet")
+
+    # Validate batch/group columns if batch is used
+    if usebatch:
+        if batch_column == group_column:
+            typer.secho("❌ --batch-column cannot be the same as --group-column", fg=typer.colors.RED)
+            raise typer.Exit(code=2)
+        
+    # Prepare qmd
+    # 1. check if outdir exists and is writable
+    # 2. find the right packaged qmd
+    # 3. copy it into outdir
+    # 4. parse extra args
+    qmd_path, extras = _prepare_qmd(outdir, pass_args)
+
+    _run_quarto_render(
+        qmd_path=qmd_path,
+        outhtmldir=outdir,
+        extra_args=extras,
+        execute_yaml="normalize.yaml",
+        counts_file=str(counts_file),
+        samplesheet=str(samplesheet),
+        useERCC=use_ercc,
+        ercc_mix=ercc_mix,
+        sample_column=sample_column,
+        group_column=group_column,
+        usebatch=usebatch,
+        batch_column=batch_column,
+        outdir=str(outdir),
+        host=host,
+        genes_selection=genes_selection,
+        edgeR_cpm_cutoff=edger_cpm_cutoff,
+        edgeR_cpm_group_fraction=edger_cpm_group_fraction,
+        DESeq2_low_count_cutoff=deseq2_low_count_cutoff,
+        DESeq2_low_count_group_fraction=deseq2_low_count_group_fraction,
+    )
+
+    typer.secho(f"✅ Normalization report and normalized count matrices written to: {outdir}", fg=typer.colors.GREEN)
 
 
 # --------------------------------------------------------------------------------------

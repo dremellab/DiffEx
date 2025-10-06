@@ -14,17 +14,17 @@ params:
   # counts_file: ".test/counts_matrix.tsv"
   # samplesheet: ".test/samples.tsv"
   # test dataset 2
-  counts_file: "~/Documents/Data/Analysis/20250423_RNAseq-2/counts/counts_matrix.tsv"
-  samplesheet: "~/Documents/Data/Analysis/20250423_RNAseq-2/counts/samples.tsv"
+  counts_file: "/Users/vishal/Documents/Data/Analysis/20250909_RNAseq-2/DEG/counts_matrix.tsv"
+  samplesheet: "/Users/vishal/Documents/Data/Analysis/20250909_RNAseq-2/DEG/samples.tsv"
   useERCC: TRUE
   ercc_mix: 1 # choices: 1, 2
-  group1: "KOS"
-  group2: "Uninf"
+  group1: "Lyt_DBR1"
+  group2: "Lyt_NTC"
   sample_column: "sampleName"
   group_column: "groupName"
   usebatch: TRUE
   batch_column: "batch"
-  outdir: "~/Documents/Data/Analysis/20250423_RNAseq-2/DiffEx_results"
+  outdir: "/Users/vishal/Documents/Data/Analysis/20250909_RNAseq-2/DEG/DiffEx_results/host/usebatch/Lyt_DBR1_vs_Lyt_NTC"
   host: "Hs" # choices: "Hs", "Mm"
   genes_selection: "host" # choices: "host", "virus", "both" # filter out genes other than this selection
   # test dataset 1
@@ -1475,6 +1475,13 @@ if (isTRUE(params$usebatch)) {
   group <- samples[[params$group_column]]
   mod <- model.matrix(~ group)  # Preserve biological signal
   
+  batch_counts <- table(batch)
+  batch_group_counts <- table(batch, group)
+  
+  if (any(batch_counts < 2) || any(batch_group_counts < 2)) {
+    print(glue::glue("⚠️ Warning: Some batches or batch-group combinations have less than 2 samples. ComBat cannot be run."))
+  } else {
+  
   # Apply ComBat on normalized logCPM
   normalized_counts_edger_batch_corrected <- as.data.frame(sva::ComBat(dat = normalized_counts_edger, batch = batch, mod = mod, par.prior = TRUE))
   normalized_counts_edger_batch_corrected %>%
@@ -1487,6 +1494,7 @@ if (isTRUE(params$usebatch)) {
               col.names = TRUE,
               row.names = FALSE)
   print(glue::glue("💾 Batch corrected normalized counts saved to: ", normalized_counts_file_batch_corrected))
+  }
 }
 
 # exit_gracefully()
@@ -1955,6 +1963,13 @@ if (isTRUE(params$usebatch)){
   batch <- samples[[params$batch_column]]
   group <- samples[[params$group_column]]
   mod <- model.matrix(~ group)  # Preserve biological signal
+
+  batch_counts <- table(batch)
+  batch_group_counts <- table(batch, group)
+  
+  if (any(batch_counts < 2) || any(batch_group_counts < 2)) {
+    print(glue::glue("⚠️ Warning: Some batches or batch-group combinations have less than 2 samples. ComBat cannot be run."))
+  } else {
   
   # Apply ComBat on normalized VST counts
   normalized_counts_deseq2_batch_corrected <- as.data.frame(sva::ComBat(dat = normalized_counts_deseq2, batch = batch, mod = mod, par.prior = TRUE))
@@ -1973,6 +1988,7 @@ if (isTRUE(params$usebatch)){
               row.names = FALSE)
   
   print(glue::glue("💾 DESeq2 batch corrected normalized counts saved to: {normalized_counts_deseq2_file_batch_corrected}"))
+  }
 }
 
 ```

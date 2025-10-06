@@ -241,7 +241,11 @@ acollection <- "H"
 if (acollection %in% avail$gs_collection) {
   message(sprintf("✔ '%s' is a valid MSigDB collection for this species.", acollection))
   gseaRes <- run_gsea(ranks, species = species, collection = "H")
+  if (nrow(as.data.frame(gseaRes)) != 0 ){
   dotplot(gseaRes, showCategory = 15) + ggtitle("GSEA Hallmark pathways")
+  } else {
+  print(glue::glue("No enrichment found!"))
+  }
 } else {
   stop(sprintf("❌ '%s' is not a valid collection. Use one of: %s",
                acollection, paste(unique(avail$gs_collection), collapse = ", ")))

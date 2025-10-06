@@ -1,7 +1,9 @@
-sampleName	groupName	path_to_R1_fastq	path_to_R2_fastq
-iSLKBAC16_3d-R1	WT_72h	/standard/dremel_lab/rawdata/testdata/HL3YNBGXG_Rep2_WT_72h_S6_R1_001.ss.fastq.gz	/standard/dremel_lab/rawdata/testdata/HL3YNBGXG_Rep2_WT_72h_S6_R2_001.ss.fastq.gz
-iSLKBAC16_3d-R2	WT_72h	/standard/dremel_lab/rawdata/testdata/HL3YNBGXG_Rep6_WT_72h_S12_R1_001.ss.fastq.gz	/standard/dremel_lab/rawdata/testdata/HL3YNBGXG_Rep6_WT_72h_S12_R2_001.ss.fastq.gz
-iSLKBAC16_3d-R3	WT_72h	/standard/dremel_lab/rawdata/testdata/HKNTGBGXG_Rep1_WT_72h_S2_R1_001.ss.fastq.gz	/standard/dremel_lab/rawdata/testdata/HKNTGBGXG_Rep1_WT_72h_S2_R2_001.ss.fastq.gz
-iSLKBAC16_3d-R4	WT_72h	/standard/dremel_lab/rawdata/testdata/HKNTGBGXG_Rep2_WT_72h_S6_R1_001.ss.fastq.gz	/standard/dremel_lab/rawdata/testdata/HKNTGBGXG_Rep2_WT_72h_S6_R2_001.ss.fastq.gz
-iSLKBAC16_3d-R5	WT_3d	/standard/dremel_lab/rawdata/testdata/HLWGFDRXY_WT_3d_RP1_S11_R1_001.ss.fastq.gz	
-iSLKBAC16_3d-R6	WT_3d	/standard/dremel_lab/rawdata/testdata/HLWGFDRXY_WT_3d_RP2_S12_R1_001.ss.fastq.gz	
+sampleName	batch	groupName	path_to_R1_fastq	path_to_R2_fastq
+Uninf_NTC_R1	R1	Lyt_NTC	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/15_iSLKBAC16pt18_Ind_siNTC_RP1_S15_R1_001.fastq.gz	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/15_iSLKBAC16pt18_Ind_siNTC_RP1_S15_R2_001.fastq.gz
+Uninf_NTC_R2	R2	Lyt_NTC	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/16_iSLKBAC16pt18_Ind_siNTC_RP2_S16_R1_001.fastq.gz	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/16_iSLKBAC16pt18_Ind_siNTC_RP2_S16_R2_001.fastq.gz
+Uninf_RLIG1_R1	R1	Lyt_DBR1	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/17_iSLKBAC16pt18_Ind_siDBR1_RP1_S17_R1_001.fastq.gz	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/17_iSLKBAC16pt18_Ind_siDBR1_RP1_S17_R2_001.fastq.gz
+Uninf_RLIG1_R2	R2	Lyt_DBR1	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/18_iSLKBAC16pt18_Ind_siDBR1_RP2_S18_R1_001.fastq.gz	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/18_iSLKBAC16pt18_Ind_siDBR1_RP2_S18_R2_001.fastq.gz
+Uninf_RTCB_R1	R1	Lyt_RLIG1	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/19_iSLKBAC16pt18_Ind_siRLIG1_RP1_S19_R1_001.fastq.gz	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/19_iSLKBAC16pt18_Ind_siRLIG1_RP1_S19_R2_001.fastq.gz
+Uninf_RTCB_R2	R2	Lyt_RLIG1	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/20_iSLKBAC16pt18_Ind_siRLIG1_RP2_S20_R1_001.fastq.gz	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/20_iSLKBAC16pt18_Ind_siRLIG1_RP2_S20_R2_001.fastq.gz
+Inf_NTC_R1	R1	Lyt_RTCB	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/21_iSLKBAC16pt18_Ind_siRTCB_RP1_S21_R1_001.fastq.gz	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/21_iSLKBAC16pt18_Ind_siRTCB_RP1_S21_R2_001.fastq.gz
+Inf_NTC_R2	R2	Lyt_RTCB	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/22_iSLKBAC16pt18_Ind_siRTCB_RP2_S22_R1_001.fastq.gz	/standard/dremel_lab/rawdata/20250909_RNAseq-2/_Inputs/22_iSLKBAC16pt18_Ind_siRTCB_RP2_S22_R2_001.fastq.gz

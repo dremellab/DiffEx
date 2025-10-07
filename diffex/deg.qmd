@@ -220,44 +220,100 @@ print(glue::glue("Genes selection: ", params$genes_selection))
 print(glue::glue("useERCC: ", params$useERCC))
 print(glue::glue("usebatch: ", params$usebatch))
 
-# Filter out genes based on the genes_selection
-if (params$genes_selection == "host") {
-  if (isTRUE(params$useERCC)) {
-    # Select only host and ERCC genes
+
+# filter based on "species column in counts matrix
+if ("species" %in% colnames(counts_data)) {
+  
+  # Filtering logic for host, virus, and ERCC counts with summary printout
+  if (params$genes_selection %in% c("host", "both")) {
     if (params$host == "Hs") {
-      filtered_counts <- filtered_counts[grepl("^ENSG|^ERCC", rownames(filtered_counts)), ]
+      host_prefix <- "^hg"
     } else if (params$host == "Mm") {
-      filtered_counts <- filtered_counts[grepl("^ENSMUSG|^ERCC", rownames(filtered_counts)), ]
+      host_prefix <- "^mm"
+    } else {
+      stop("❌ Invalid host specified. Choose 'Hs' or 'Mm'.")
     }
+  
+    host_counts <- counts_data %>%
+    dplyr::filter(grepl(host_prefix, species, ignore.case = TRUE)) %>%
+    dplyr::select(all_of(sample_ids))
+    
+    print(glue::glue("✅ Selected {nrow(host_counts)} host genes (species starts with '{host_prefix}')."))
   } else {
-    # Select only host genes no ERCC genes
-    if (params$host == "Hs") {
-      filtered_counts <- filtered_counts[grepl("^ENSG", rownames(filtered_counts)), ]
-    } else if (params$host == "Mm") {
-      filtered_counts <- filtered_counts[grepl("^ENSMUSG", rownames(filtered_counts)), ]
-    }
+    host_counts <- NULL
   }
-  nercc_genes <- nrow(filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ])
-  print(glue::glue("🦠 Host-only genes selected: ", nrow(filtered_counts), " genes remaining (including ", nercc_genes, " ERCC genes)"))
-} else if (params$genes_selection == "virus") {
+  
+  if (params$genes_selection %in% c("virus", "both")) {
+    virus_counts <- counts_data %>%
+    dplyr::filter(
+    !grepl("^(hg|mm)", species, ignore.case = TRUE) &
+    !species %in% c("BAC16Insert", "ERCC")
+    ) %>%
+    dplyr::select(all_of(sample_ids))
+    print(glue::glue("✅ Selected {nrow(virus_counts)} virus genes (excluding hg*, mm*, BAC16Insert, ERCC)."))
+  } else {
+    virus_counts <- NULL
+  }
+  
   if (isTRUE(params$useERCC)) {
-    # Filter out host genes .. keep ERCC
-    filtered_counts <- filtered_counts[!grepl("^ENS", rownames(filtered_counts)), ]
+    ercc_counts <- counts_data %>%
+    dplyr::filter(species == "ERCC") %>%
+    dplyr::select(all_of(sample_ids))
+    print(glue::glue("✅ Selected {nrow(ercc_counts)} ERCC genes."))
   } else {
-    # Filter out host genes and ERCC genes
-    filtered_counts <- filtered_counts[!grepl("^ERCC|^ENS", rownames(filtered_counts)), ]
+    ercc_counts <- NULL
   }
-  nercc_genes <- nrow(filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ])
-  print(glue::glue("🦠 Virus-only genes selected: ", nrow(filtered_counts), " genes remaining (including ", nercc_genes, " ERCC genes)"))
-} else if (params$genes_selection == "both") {
-  if (!isTRUE(params$useERCC)) {
-    # Keep both host and virus genes .. remove ERCC
-    filtered_counts <- filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ]
-  }
-  nercc_genes <- nrow(filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ])
-  print(glue::glue("🦠 Both host and virus genes included: ", nrow(filtered_counts), " genes remaining (including ", nercc_genes, " ERCC genes)"))
+  
+  # Combine selected counts into one matrix
+  filtered_counts <- dplyr::bind_rows(
+  host_counts,
+  virus_counts,
+  ercc_counts
+  )
+  
+  # print(glue::glue("📦 Combined filtered counts: {nrow(filtered_counts)} genes × {ncol(filtered_counts)} samples."))
+
 } else {
-  stop("❌ Invalid mode selected. Choose 'host', 'virus', or 'both'.")
+  # Filter out genes based on the genes_selection
+  if (params$genes_selection == "host") {
+    if (isTRUE(params$useERCC)) {
+      # Select only host and ERCC genes
+      if (params$host == "Hs") {
+        filtered_counts <- filtered_counts[grepl("^ENSG|^ERCC", rownames(filtered_counts)), ]
+      } else if (params$host == "Mm") {
+        filtered_counts <- filtered_counts[grepl("^ENSMUSG|^ERCC", rownames(filtered_counts)), ]
+      }
+    } else {
+      # Select only host genes no ERCC genes
+      if (params$host == "Hs") {
+        filtered_counts <- filtered_counts[grepl("^ENSG", rownames(filtered_counts)), ]
+      } else if (params$host == "Mm") {
+        filtered_counts <- filtered_counts[grepl("^ENSMUSG", rownames(filtered_counts)), ]
+      }
+    }
+    nercc_genes <- nrow(filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ])
+    print(glue::glue("🦠 Host-only genes selected: ", nrow(filtered_counts), " genes remaining (including ", nercc_genes, " ERCC genes)"))
+  } else if (params$genes_selection == "virus") {
+    if (isTRUE(params$useERCC)) {
+      # Filter out host genes .. keep ERCC
+      filtered_counts <- filtered_counts[!grepl("^ENS", rownames(filtered_counts)), ]
+    } else {
+      # Filter out host genes and ERCC genes
+      filtered_counts <- filtered_counts[!grepl("^ERCC|^ENS", rownames(filtered_counts)), ]
+    }
+    nercc_genes <- nrow(filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ])
+    print(glue::glue("🦠 Virus-only genes selected: ", nrow(filtered_counts), " genes remaining (including ", nercc_genes, " ERCC genes)"))
+  } else if (params$genes_selection == "both") {
+    if (!isTRUE(params$useERCC)) {
+      # Keep both host and virus genes .. remove ERCC
+      filtered_counts <- filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ]
+    }
+    nercc_genes <- nrow(filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ])
+    print(glue::glue("🦠 Both host and virus genes included: ", nrow(filtered_counts), " genes remaining (including ", nercc_genes, " ERCC genes)"))
+  } else {
+    stop("❌ Invalid mode selected. Choose 'host', 'virus', or 'both'.")
+  }
+  
 }
 # Report dimensions
 print(glue::glue("📦 Filtered counts matrix: ", nrow(filtered_counts), " genes × ", ncol(filtered_counts), " samples"))

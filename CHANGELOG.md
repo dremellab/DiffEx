@@ -1,5 +1,16 @@
 # dev version
 
+# v0.5.0
+
+### Added
+
+- `normalize` subcommand to generated normalized counts matrix with all samples
+
+### Changed
+
+- logic to select rows and columns from raw counts matrix using "species" column in the input counts matrix if present
+- minor bug fixes
+
 # v0.4.1
 
 ### Changed

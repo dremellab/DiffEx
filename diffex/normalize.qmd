@@ -179,7 +179,61 @@ print(glue::glue("Genes selection: ", params$genes_selection))
 print(glue::glue("useERCC: ", params$useERCC))
 print(glue::glue("usebatch: ", params$usebatch))
 
-# Filter out genes based on the genes_selection
+# filter based on "species column in counts matrix
+if ("species" %in% colnames(counts_data)) {
+  
+  # Filtering logic for host, virus, and ERCC counts with summary printout
+  if (params$genes_selection %in% c("host", "both")) {
+    if (params$host == "Hs") {
+      host_prefix <- "^hg"
+    } else if (params$host == "Mm") {
+      host_prefix <- "^mm"
+    } else {
+      stop("❌ Invalid host specified. Choose 'Hs' or 'Mm'.")
+    }
+  
+    host_counts <- counts_data %>%
+    dplyr::filter(grepl(host_prefix, species, ignore.case = TRUE)) %>%
+    dplyr::select(all_of(sample_columns))
+    
+    print(glue::glue("✅ Selected {nrow(host_counts)} host genes (species starts with '{host_prefix}')."))
+  } else {
+    host_counts <- NULL
+  }
+  
+  if (params$genes_selection %in% c("virus", "both")) {
+    virus_counts <- counts_data %>%
+    dplyr::filter(
+    !grepl("^(hg|mm)", species, ignore.case = TRUE) &
+    !species %in% c("BAC16Insert", "ERCC")
+    ) %>%
+    dplyr::select(all_of(sample_columns))
+    print(glue::glue("✅ Selected {nrow(virus_counts)} virus genes (excluding hg*, mm*, BAC16Insert, ERCC)."))
+  } else {
+    virus_counts <- NULL
+  }
+  
+  if (isTRUE(params$useERCC)) {
+    ercc_counts <- counts_data %>%
+    dplyr::filter(species == "ERCC") %>%
+    dplyr::select(all_of(sample_columns))
+    print(glue::glue("✅ Selected {nrow(ercc_counts)} ERCC genes."))
+  } else {
+    ercc_counts <- NULL
+  }
+  
+  # Combine selected counts into one matrix
+  filtered_counts <- dplyr::bind_rows(
+  host_counts,
+  virus_counts,
+  ercc_counts
+  )
+  
+  # print(glue::glue("📦 Combined filtered counts: {nrow(filtered_counts)} genes × {ncol(filtered_counts)} samples."))
+
+} else {
+# Filter out genes based on the genes_selection 
+# this is the old way when species column was not available in the counts matrix
 if (params$genes_selection == "host") {
   if (isTRUE(params$useERCC)) {
     # Select only host and ERCC genes
@@ -212,11 +266,16 @@ if (params$genes_selection == "host") {
   if (!isTRUE(params$useERCC)) {
     # Keep both host and virus genes .. remove ERCC
     filtered_counts <- counts[grepl("^ERCC", rownames(counts)), ]
+  } else {
+    # Keep both host and virus genes .. keep ERCC
+    filtered_counts <- counts
   }
   nercc_genes <- nrow(filtered_counts[grepl("^ERCC", rownames(filtered_counts)), ])
   print(glue::glue("🦠 Both host and virus genes included: ", nrow(filtered_counts), " genes remaining (including ", nercc_genes, " ERCC genes)"))
 } else {
   stop("❌ Invalid mode selected. Choose 'host', 'virus', or 'both'.")
+}
+  
 }
 # Report dimensions
 print(glue::glue("📦 Filtered counts matrix: ", nrow(filtered_counts), " genes × ", ncol(filtered_counts), " samples"))
@@ -411,6 +470,7 @@ if (isTRUE(params$useERCC)) {
     options = list(pageLength = 20, autoWidth = TRUE)
   )
 }
+# exit_gracefully()
 ```
 
 
@@ -705,6 +765,7 @@ if (isTRUE(params$useERCC)) {
 } else {
   print(glue::glue("✅ Using Limma-voom for normalization."))
 
+  
   # 1. Create DGEList
   dge <- DGEList(counts = ready_for_deg_raw_counts)
   group <- samples[[params$group_column]]
@@ -789,6 +850,14 @@ if (isTRUE(params$useERCC)) {
     # Save normalized counts to a file
   as.data.frame(pseudo_log2_normalized_counts) %>%
     rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_for_output
+  
+  # Add metadata columns
+  if (exists("counts_metadata")) {
+  pseudo_log2_normalized_counts_for_output <- merge(
+  counts_metadata, pseudo_log2_normalized_counts_for_output,
+  by.x = "row.names", by.y = "gene", all.y = TRUE) %>% dplyr::rename(gene_id = Row.names)
+  }
+
   write.table(pseudo_log2_normalized_counts_for_output,
               file = normalized_counts_file,
               sep = "\t",
@@ -801,6 +870,14 @@ if (isTRUE(params$useERCC)) {
   pseudo_rpkm_counts[is.na(pseudo_rpkm_counts)] <- 0
   pseudo_rpkm_counts_for_output <- as.data.frame(pseudo_rpkm_counts) %>%
     rownames_to_column(var = "gene")
+  
+  # Add metadata columns
+  if (exists("counts_metadata")) {
+  pseudo_rpkm_counts_for_output <- merge(
+  counts_metadata, pseudo_rpkm_counts_for_output,
+  by.x = "row.names", by.y = "gene", all.y = TRUE) %>% dplyr::rename(gene_id = Row.names)
+  }
+  
   pseudo_rpkm_counts_file <- file.path(counts_dir, "limma_pseudo_rpkm_counts.tsv")
   write.table(pseudo_rpkm_counts_for_output,
               file = pseudo_rpkm_counts_file,
@@ -812,6 +889,14 @@ if (isTRUE(params$useERCC)) {
     pseudo_log2_normalized_counts_batch_corrected_file <- file.path(counts_dir, "limma_log2normalized_pseudo_rpkm_counts_batch_corrected.tsv")
     as.data.frame(pseudo_log2_normalized_counts_batch_corrected) %>%
       rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_batch_corrected_for_output
+
+    # Add metadata columns
+    if (exists("counts_metadata")) {
+    pseudo_log2_normalized_counts_batch_corrected_for_output <- merge(
+    counts_metadata, pseudo_log2_normalized_counts_batch_corrected_for_output,
+    by.x = "row.names", by.y = "gene", all.y = TRUE) %>% dplyr::rename(gene_id = Row.names)
+    }
+    
     write.table(pseudo_log2_normalized_counts_batch_corrected_for_output,
                 file = pseudo_log2_normalized_counts_batch_corrected_file,
                 sep = "\t",
@@ -825,6 +910,14 @@ if (isTRUE(params$useERCC)) {
   
   as.data.frame(log2_normalized_counts_limma) %>%
     rownames_to_column(var = "gene") -> log2_normalized_counts_limma_for_output
+
+    # Add metadata columns
+    if (exists("counts_metadata")) {
+    log2_normalized_counts_limma_for_output <- merge(
+    counts_metadata, log2_normalized_counts_limma_for_output,
+    by.x = "row.names", by.y = "gene", all.y = TRUE) %>% dplyr::rename(gene_id = Row.names)
+    }
+  
   write.table(log2_normalized_counts_limma_for_output,
               file = normalized_counts_file,
               sep = "\t",
@@ -837,6 +930,14 @@ if (isTRUE(params$useERCC)) {
     log2_normalized_counts_limma_batch_corrected_file <- file.path(counts_dir, "limma_voom_normalized_counts_batch_corrected.tsv")
     as.data.frame(log2_normalized_counts_limma_batch_corrected) %>%
       rownames_to_column(var = "gene") -> log2_normalized_counts_limma_batch_corrected_for_output
+
+    # Add metadata columns
+    if (exists("counts_metadata")) {
+    log2_normalized_counts_limma_batch_corrected_for_output <- merge(
+    counts_metadata, log2_normalized_counts_limma_batch_corrected_for_output,
+    by.x = "row.names", by.y = "gene", all.y = TRUE) %>% dplyr::rename(gene_id = Row.names)
+    }
+    
     write.table(log2_normalized_counts_limma_batch_corrected_for_output,
                 file = log2_normalized_counts_limma_batch_corrected_file,
                 sep = "\t",
@@ -1146,8 +1247,18 @@ if (isTRUE(params$useERCC)) {
 normalized_counts_edger <- as.data.frame(cpm(dge_final, normalized.lib.sizes = TRUE, log = TRUE))
 normalized_counts_edger %>%
   rownames_to_column(var = "gene") -> normalized_counts_edger_for_plots
+
+# Add metadata columns
+if (exists("counts_metadata")) {
+  normalized_counts_edger_for_output <- merge(
+  counts_metadata, normalized_counts_edger_for_plots,
+  by.x = "row.names", by.y = "gene", all.y = TRUE) %>% dplyr::rename(gene_id = Row.names)
+} else {
+  normalized_counts_edger_for_output <- normalized_counts_edger_for_plots
+}
+
 normalized_counts_file <- file.path(counts_dir, "edgeR_TMM_normalized_logCPM_counts.tsv")
-write.table(normalized_counts_edger_for_plots,
+write.table(normalized_counts_edger_for_output,
             file = normalized_counts_file,
             sep = "\t",
             quote = FALSE,
@@ -1173,8 +1284,18 @@ if (isTRUE(params$usebatch)) {
   normalized_counts_edger_batch_corrected <- as.data.frame(sva::ComBat(dat = normalized_counts_edger, batch = batch, mod = mod, par.prior = TRUE))
   normalized_counts_edger_batch_corrected %>%
     rownames_to_column(var = "gene") -> normalized_counts_edger_for_plots
+
+  # Add metadata columns
+  if (exists("counts_metadata")) {
+  normalized_counts_edger_for_output <- merge(
+  counts_metadata, normalized_counts_edger_for_plots,
+  by.x = "row.names", by.y = "gene", all.y = TRUE) %>% dplyr::rename(gene_id = Row.names)
+  } else {
+  normalized_counts_edger_for_output <- normalized_counts_edger_for_plots
+  }
+  
   normalized_counts_file_batch_corrected <- file.path(counts_dir, "edgeR_TMM_normalized_logCPM_counts_batch_corrected.tsv")
-  write.table(normalized_counts_edger_for_plots,
+  write.table(normalized_counts_edger_for_output,
               file = normalized_counts_file_batch_corrected,
               sep = "\t",
               quote = FALSE,
@@ -1473,11 +1594,20 @@ normalized_counts_deseq2 <- assay(vst_obj) %>% as.data.frame()
 normalized_counts_deseq2_for_plots <- normalized_counts_deseq2 %>%
   tibble::rownames_to_column(var = "gene")
 
+# Add metadata columns
+if (exists("counts_metadata")) {
+  normalized_counts_deseq2_for_output <- merge(
+  counts_metadata, normalized_counts_deseq2_for_plots,
+  by.x = "row.names", by.y = "gene", all.y = TRUE) %>% dplyr::rename(gene_id = Row.names)
+} else {
+  normalized_counts_deseq2_for_output <- normalized_counts_deseq2_for_plots
+}
+
 # Define output file path
 normalized_counts_deseq2_file <- file.path(counts_dir, "DESeq2_vst_normalized_counts.tsv")
 
 # Write to file
-write.table(normalized_counts_deseq2_for_plots,
+write.table(normalized_counts_deseq2_for_output,
             file = normalized_counts_deseq2_file,
             sep = "\t",
             quote = FALSE,
@@ -1504,12 +1634,20 @@ if (isTRUE(params$usebatch)){
   normalized_counts_deseq2_batch_corrected <- as.data.frame(sva::ComBat(dat = normalized_counts_deseq2, batch = batch, mod = mod, par.prior = TRUE))
   normalized_counts_deseq2_for_plots <- normalized_counts_deseq2_batch_corrected %>%
     tibble::rownames_to_column(var = "gene")
-  
+
+  # Add metadata columns
+  if (exists("counts_metadata")) {
+    normalized_counts_deseq2_for_output <- merge(
+    counts_metadata, normalized_counts_deseq2_for_plots,
+    by.x = "row.names", by.y = "gene", all.y = TRUE) %>% dplyr::rename(gene_id = Row.names)
+  } else {
+    normalized_counts_deseq2_for_output <- normalized_counts_deseq2_for_plots
+  }
   # Define output file path
   normalized_counts_deseq2_file_batch_corrected <- file.path(counts_dir, "DESeq2_vst_normalized_counts_batch_corrected.tsv")
   
   # Write to file
-  write.table(normalized_counts_deseq2_for_plots,
+  write.table(normalized_counts_deseq2_for_output,
               file = normalized_counts_deseq2_file_batch_corrected,
               sep = "\t",
               quote = FALSE,

@@ -18,3 +18,4 @@ renv/library/
 renv/python/
 renv/staging/
 .Rproj.user
+build.log

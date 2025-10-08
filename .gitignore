@@ -1,5 +1,4 @@
 site/
-.Rproj.user/
 .DS_Store
 *.pyc
 *.pyo
@@ -18,4 +17,4 @@ results*/
 renv/library/
 renv/python/
 renv/staging/
-.Rhistory
+.Rproj.user

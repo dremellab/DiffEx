@@ -1,5 +1,8 @@
 # install_all_pkgs.R
 
+.libPaths("/opt/micromamba/envs/diffex-env/lib/R/library")
+message("Using library path(s): ", paste(.libPaths(), collapse = ", "))
+
 pkgs_raw <- c(
   "limma","edgeR","DESeq2",
   "tibble","readr","dplyr","tidyr","ggplot2","plotly","tidyverse",
@@ -8,20 +11,30 @@ pkgs_raw <- c(
   "AnnotationDbi","org.Mm.eg.db","org.Hs.eg.db",
   "openxlsx","ggplotify","ggpubr","ggrepel","glue","DT",
   "ComplexHeatmap",
-  "UpSetR","yaml","fs","VennDiagram","grid","sva"
+  "UpSetR","yaml","fs","VennDiagram","grid","sva",
+  "rmarkdown","stringr","purrr","RColorBrewer","viridis","pheatmap","cowplot","patchwork"
 )
+
 
 pkgs <- unique(pkgs_raw)
 base_like <- c("grid")  # ships with base R; don’t install
 pkgs <- setdiff(pkgs, base_like)
 
-options(repos = c(CRAN = "https://cloud.r-project.org"))
+# options(repos = c(CRAN = "https://cloud.r-project.org"))
+options(repos = BiocManager::repositories(
+  replace = TRUE,
+  CRAN = "https://packagemanager.posit.co/cran/__linux__/bookworm/2025-09-01"
+))
+
 
 if (!requireNamespace("BiocManager", quietly = TRUE)) {
-  install.packages("BiocManager")
+  install.packages("BiocManager", repos = getOption("repos"))
 }
-message("Bioconductor via BiocManager ", as.character(utils::packageVersion("BiocManager")),
-        " (Bioc ", BiocManager::version(), ")")
+
+if (requireNamespace("BiocManager", quietly = TRUE)) {
+  message("BiocManager ", packageVersion("BiocManager"),
+          " (Bioconductor ", BiocManager::version(), ")")
+}
 
 bioc_avail <- tryCatch(BiocManager::available(), error = function(e) character())
 is_bioc <- pkgs %in% bioc_avail
@@ -47,9 +60,12 @@ if (length(need_bioc)) {
   message("No Bioconductor packages to install.")
 }
 
-still_missing <- setdiff(pkgs, rownames(installed.packages()))
+installed <- rownames(installed.packages())
+still_missing <- setdiff(pkgs, installed)
 if (length(still_missing)) {
   message("WARNING: still missing: ", paste(still_missing, collapse = ", "))
+} else {
+  message("All requested packages installed.")
 }
 
 suppressPackageStartupMessages({

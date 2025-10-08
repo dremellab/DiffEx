@@ -70,7 +70,7 @@ RUN micromamba install -y -n diffex-env -c conda-forge \
 # Clone and install DiffEx
 # -----------------------------------------------
 RUN git clone --branch main --single-branch https://github.com/dremellab/DiffEx.git /app/DiffEx && \
-    cd /app/DiffEx && \
+    cd /app/DiffEx  && \
     git checkout ${DIFFEX_COMMIT} && \
     micromamba run -n diffex-env pip install -e /app/DiffEx
 

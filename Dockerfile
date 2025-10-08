@@ -82,14 +82,14 @@ WORKDIR /app/DiffEx
 # Option 1: If install_R_packages.R already installs everything needed, use it:
 # COPY diffex/install_R_packages.R /opt/install_R_packages.R
 # RUN micromamba run -n diffex-env Rscript /opt/install_R_packages.R
-
+RUN micromamba run -n diffex-env Rscript -e 'renv::activate(); getOption("repos")'
 # Option 2: (better) Use renv to reproduce exactly your local R environment:
-RUN micromamba run -n diffex-env Rscript -e 'renv::restore(prompt = FALSE)'
-RUN micromamba run -n diffex-env Rscript -e 'renv::repair(); renv::snapshot(prompt = FALSE)'
-# -----------------------------------------------
-# Final environment settings
-# -----------------------------------------------
-ENV RENV_CONFIG_INSTALL_FROM_SOURCE=true \
-    RENV_CONFIG_USE_CACHE=false
+# RUN micromamba run -n diffex-env Rscript -e 'renv::restore(prompt = FALSE)'
+# RUN micromamba run -n diffex-env Rscript -e 'renv::repair(); renv::snapshot(prompt = FALSE)'
+# # -----------------------------------------------
+# # Final environment settings
+# # -----------------------------------------------
+# ENV RENV_CONFIG_INSTALL_FROM_SOURCE=true \
+#     RENV_CONFIG_USE_CACHE=false
 
-CMD ["/bin/bash"]
+# CMD ["/bin/bash"]

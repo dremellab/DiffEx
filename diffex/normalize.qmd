@@ -146,6 +146,13 @@ if (length(present_cols) != length(keep_cols)) {
   stop("❌ The following required columns are missing from 'samples': ", paste(missing_cols, collapse = ", "))
 }
 
+# Function to normalize values ... change all hyphens to underscore and add X prefix if starts with digit
+normalize_values <- function(x) {
+  x <- trimws(x)  # Trim whitespace
+  x <- gsub("-", "_", x)      # Replace hyphen with underscore
+  x <- gsub("^([0-9])", "X\\1", x)  # Prefix with X if starts with a digit
+  return(x)
+}
 
 # Read the counts matrix
 counts_data <- read.table(params$counts_file,
@@ -153,9 +160,19 @@ counts_data <- read.table(params$counts_file,
                      row.names = 1, 
                      sep = "\t", 
                      header = TRUE)
-colnames(counts_data) <- gsub("-", "_", colnames(counts_data))
-counts_metadata <- counts_data[, c( "species", grep("^gene_", colnames(counts_data), value = TRUE))]
+
+# Normalize column names in counts matrix and sample names in samplesheet
+colnames(counts_data) <- normalize_values(colnames(counts_data))
+samples[keep_cols] <- lapply(samples[keep_cols], normalize_values)
 sample_columns <- samples[[params$sample_column]]
+
+# Extract metadata columns from counts matrix if present
+counts_metadata <- counts_data[, c( "species", grep("^gene_", colnames(counts_data), value = TRUE))]
+
+# Ensure all sample columns are present in counts matrix
+# counts = only counts
+# counts_data = counts + metadata columns
+# original_counts = original counts matrix before filtering
 counts <- counts_data[, c(sample_columns)]
 original_counts <- counts
 

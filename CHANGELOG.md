@@ -1,5 +1,42 @@
 # dev version
 
+# v0.5.1
+
+**Release date:** October 9, 2025
+
+### 🔧 Build & Environment
+
+* Refactored **Dockerfile**:
+
+  * Added locale configuration (`en_US.UTF-8`) for consistent Quarto rendering.
+  * Simplified `micromamba` install commands (added `libxml2-devel` to the micromamba environment ... required for properly installl `clusterProfiler` and `sva` Biocondunctor packages).
+  * Explicitly disabled renv auto-loader via `RENV_CONFIG_AUTOLOADER_ENABLED=FALSE` ... not using `renv` for package installations.
+  * Added `DIFFEX_COMMIT` build arg and support for pinning specific commits ... tags can also be parsed
+  * Included docker helper scripts: `build_docker.sh` and `push_docker.sh`.
+
+### 📦 R Environment & Dependency Fixes
+
+* Introduced `.Renviron` with pinned CRAN snapshot:
+  `https://packagemanager.posit.co/cran/__linux__/bookworm/2025-09-01` ... This pins down specific repo instead of using "latest".
+* Updated `.Rprofile` to include micromamba R library in `.libPaths()` ... To include path in the mamba environment.
+* Enhanced `install_R_packages.R`:
+
+  * Added explicit `.libPaths()` initialization.
+  * Switched CRAN source from cloud to pinned snapshot.
+  * Added new helper/plotting packages (`rmarkdown`, `stringr`, `purrr`, `RColorBrewer`, `viridis`, `pheatmap`, `cowplot`, `patchwork`).
+  * Improved Bioconductor detection, install messaging, and final status reporting.
+
+### 🧬 Code Fixes & Features
+
+* Added normalization helper in `normalize.qmd` to clean column names (replacing hyphens, prefixing digits).
+* Addressed renv and CRAN version conflicts (reverted `ggplot2` 4.0.0 → 3.5.2).
+* Updated `renv.lock` to use pinned CRAN URLs (replaced `/latest` with snapshot URLs).
+
+### 🧰 Project & Metadata
+
+* Added new RStudio project file `DiffEx.Rproj`.
+* Updated `.gitignore` to include `build.log`.
+
 # v0.5.0
 
 ### Added

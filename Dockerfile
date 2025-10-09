@@ -63,7 +63,8 @@ RUN micromamba install -y -n diffex-env -c conda-forge \
     r-rlang r-glue r-dplyr \
     compilers pkg-config \
     zlib bzip2 xz zstd lz4-c freetype fontconfig harfbuzz fribidi \
-    libxml2 libcurl openssl && \
+    libxml2 libxml2-devel libcurl openssl make gcc gxx gfortran cmake git pandoc \
+ && \
     micromamba clean -a -y
 
 # -----------------------------------------------
@@ -90,6 +91,7 @@ RUN micromamba run -n diffex-env Rscript /opt/install_R_packages.R
 # # Final environment settings
 # # -----------------------------------------------
 ENV RENV_CONFIG_INSTALL_FROM_SOURCE=true \
-    RENV_CONFIG_USE_CACHE=false
+    RENV_CONFIG_USE_CACHE=false \
+    RENV_CONFIG_AUTOLOADER_ENABLED=FALSE
 
 CMD ["/bin/bash"]

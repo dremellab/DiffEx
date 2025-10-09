@@ -137,6 +137,7 @@ def _run_quarto_render(
 
     _ensure_exists(qmd_path, "Quarto file")
     outhtmldir.mkdir(parents=True, exist_ok=True)
+    outhtml = os.join(outhtmldir, qmd_path.stem + ".html")
 
     yaml_path = outhtmldir / execute_yaml
     with open(yaml_path, "w") as f:
@@ -147,7 +148,7 @@ def _run_quarto_render(
         "--to", "html",
         "--no-cache",
         "--self-contained",
-        "--output-dir", str(outhtmldir),
+        "--output", str(outhtml),
         "--execute-params", str(yaml_path),
     ]
 

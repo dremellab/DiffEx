@@ -137,8 +137,14 @@ def _run_quarto_render(
 
     _ensure_exists(qmd_path, "Quarto file")
     outhtmldir.mkdir(parents=True, exist_ok=True)
-    outhtml = os.join(outhtmldir, qmd_path.stem + ".html")
 
+    # ✅ Copy QMD to output dir if needed
+    if qmd_path.parent.resolve() != outhtmldir.resolve():
+        qmd_copy = outhtmldir / qmd_path.name
+        typer.secho(f"📁 Copying {qmd_path.name} → {qmd_copy}", fg=typer.colors.BRIGHT_BLUE)
+        shutil.copy2(qmd_path, qmd_copy)
+        qmd_path = qmd_copy
+        
     yaml_path = outhtmldir / execute_yaml
     with open(yaml_path, "w") as f:
         yaml.safe_dump(params, f, sort_keys=False)
@@ -148,7 +154,6 @@ def _run_quarto_render(
         "--to", "html",
         "--no-cache",
         "--self-contained",
-        "--output", str(outhtml),
         "--execute-params", str(yaml_path),
     ]
 

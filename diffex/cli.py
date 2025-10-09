@@ -144,7 +144,7 @@ def _run_quarto_render(
         typer.secho(f"📁 Copying {qmd_path.name} → {qmd_copy}", fg=typer.colors.BRIGHT_BLUE)
         shutil.copy2(qmd_path, qmd_copy)
         qmd_path = qmd_copy
-        
+
     yaml_path = outhtmldir / execute_yaml
     with open(yaml_path, "w") as f:
         yaml.safe_dump(params, f, sort_keys=False)
@@ -154,6 +154,7 @@ def _run_quarto_render(
         "--to", "html",
         "--no-cache",
         "--self-contained",
+        "--output-dir",".",
         "--execute-params", str(yaml_path),
     ]
 

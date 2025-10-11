@@ -7,6 +7,11 @@ LABEL maintainer="SeqInfOmics <cud2td@virginia.edu>" \
       description="Quarto + R(4.4.3/Bioc 3.20) + Python env for DiffEx QMDs"
 
 # -----------------------------------------------
+ARG DIFFEX_COMMIT
+ENV DIFFEX_COMMIT=${DIFFEX_COMMIT}
+# -----------------------------------------------
+
+# -----------------------------------------------
 # System dependencies (headers & tools + locale)
 # -----------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -72,6 +77,7 @@ RUN micromamba install -y -n diffex-env -c conda-forge \
 # -----------------------------------------------
 RUN git clone https://github.com/dremellab/DiffEx.git /app/DiffEx && \
     cd /app/DiffEx  && \
+    git fetch --all && \
     git checkout ${DIFFEX_COMMIT} && \
     micromamba run -n diffex-env pip install -e /app/DiffEx
 

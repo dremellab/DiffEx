@@ -1,5 +1,11 @@
 # dev version
 
+# v0.5.2 
+
+- Added `DIFFEX_COMMIT` build arg to support building from any branch or commit.
+- Updated Dockerfile to `git fetch --all` before checkout.
+- `cli.py`: copy QMDs to output dir before rendering; adjusted `--output-dir` to `.`.
+
 # v0.5.1
 
 **Release date:** October 9, 2025

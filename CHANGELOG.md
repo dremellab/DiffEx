@@ -1,5 +1,11 @@
 # dev version
 
+- Fixed a problem in the ranking step used for pathway analysis so it no longer fails
+  when values are missing or repeated, and now shows clearer error messages.
+
+- Improved the overlap plot so it checks the input first and shows helpful error
+  messages instead of crashing.
+
 # v0.5.2 
 
 - Added `DIFFEX_COMMIT` build arg to support building from any branch or commit.

@@ -2463,9 +2463,22 @@ venn_sets <- list(
   limma_Down = limma_down
 )
 
-# Use UpSetR for better readability with 6 sets
-venn_input <- fromList(venn_sets)
-UpSetR::upset(venn_input, nsets = 6, order.by = "freq", main.bar.color = "#377eb8", sets.bar.color = "#e41a1c")
+# Convert to UpSetR input and guard against empty inputs
+venn_input <- UpSetR::fromList(venn_sets)
+
+# If there are no genes / no sets to plot, skip plotting and show a message
+if (is.null(venn_input) || ncol(venn_input) == 0 || nrow(venn_input) == 0) {
+  message("UpSetR: no DEG sets available to plot (empty or missing). Skipping UpSet plot.")
+} else {
+  # Ensure nsets does not exceed available columns
+  available_sets <- ncol(venn_input)
+  sets_to_plot <- min(6, available_sets)
+  tryCatch({
+    UpSetR::upset(venn_input, nsets = sets_to_plot, order.by = "freq", main.bar.color = "#377eb8", sets.bar.color = "#e41a1c")
+  }, error = function(e) {
+    message("UpSetR plotting failed: ", conditionMessage(e))
+  })
+}
 ```
 
 

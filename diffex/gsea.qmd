@@ -152,6 +152,50 @@ prep <- prepare_ranks(rnk)
 species <- prep$species
 ranks   <- prep$ranks
 
+# --- Sanitize ranks: remove NA/NaN/Inf and unnamed or duplicated entries ---
+# Many GSEA implementations (fgsea/clusterProfiler) expect a named numeric vector
+# of finite values. If the .rnk file contained NA/NaN/Inf or duplicate names,
+# fgsea::preparePathwaysAndStats can error with "Not all stats values are finite numbers".
+
+# Ensure it's numeric (preserve names)
+if (!is.numeric(ranks)) {
+  ranks <- as.numeric(ranks)
+  names(ranks) <- names(prep$ranks)
+}
+
+# Remove NA / NaN / Inf values
+bad_vals <- !is.finite(ranks) | is.na(ranks)
+if (any(bad_vals)) {
+  message("GSEA: removing ", sum(bad_vals), " non-finite or NA rank values")
+  ranks <- ranks[!bad_vals]
+}
+
+# Remove entries without gene names
+unnamed <- is.na(names(ranks)) | names(ranks) == ""
+if (any(unnamed)) {
+  message("GSEA: removing ", sum(unnamed), " entries with missing gene names")
+  ranks <- ranks[!unnamed]
+}
+
+# Collapse duplicated gene names by keeping the maximum score (like earlier logic)
+if (any(duplicated(names(ranks)))) {
+  df_r <- tibble::tibble(gene = names(ranks), score = as.numeric(ranks))
+  df_r2 <- df_r %>%
+    dplyr::group_by(gene) %>%
+    dplyr::summarise(score = max(score, na.rm = TRUE), .groups = "drop") %>%
+    dplyr::arrange(dplyr::desc(score))
+  ranks <- setNames(df_r2$score, df_r2$gene)
+  message("GSEA: collapsed duplicated gene names; now ", length(ranks), " unique genes")
+}
+
+if (length(ranks) == 0) {
+  stop("GSEA: no valid ranks available after sanitization — check your .rnk file for invalid values")
+}
+
+if (!all(is.finite(ranks))) {
+  stop("GSEA: non-finite values remain in ranks after sanitization")
+}
+
 run_gsea <- function(ranks, 
                      species = "Homo sapiens", 
                      collection = "H", 

@@ -1,6 +1,6 @@
 [project]
 name = "diffex"
-version = "0.5.2-dev"
+version = "0.5.3"
 description = "Differential expression report generator using edgeR and Quarto"
 dependencies = ["typer==0.16.1", "pyyaml"]
 

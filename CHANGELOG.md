@@ -1,5 +1,11 @@
 # dev version
 
+- Placeholder for ongoing development notes.
+
+# v0.5.3
+
+**Release date:** December 12, 2025
+
 - Fixed a problem in the ranking step used for pathway analysis so it no longer fails
   when values are missing or repeated, and now shows clearer error messages.
 

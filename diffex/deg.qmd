@@ -1992,8 +1992,10 @@ if (isTRUE(params$useERCC)) {
 #| echo: false
 
 
-# Run VST and extract assay
-vst_obj <- vst(dds, blind = TRUE)
+# Run variance-stabilizing transformation and extract assay
+# use the more robust `varianceStabilizingTransformation()` which works
+# for small or low-count datasets where `vst()` may fail
+vst_obj <- varianceStabilizingTransformation(dds, blind = TRUE)
 normalized_counts_deseq2 <- assay(vst_obj) %>% as.data.frame()
 
 # Add gene column only if not present

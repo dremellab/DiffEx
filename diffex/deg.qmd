@@ -132,7 +132,12 @@ print(glue::glue(params$counts_file, " and "))
 print(glue::glue(params$samplesheet))
 
 # Read the sample sheet
-samples <- read.table(params$samplesheet, check.names = FALSE, sep = "\t", header = TRUE)
+samples <- read.table(params$samplesheet, check.names = FALSE, sep = "\t", header = TRUE, fill = TRUE)
+# Drop any empty header columns from trailing delimiters
+empty_cols <- which(is.na(colnames(samples)) | colnames(samples) == "")
+if (length(empty_cols) > 0) {
+  samples <- samples[, -empty_cols, drop = FALSE]
+}
 keep_cols <- c(params$sample_column, params$group_column)
 if (isTRUE(params$usebatch)) {
   keep_cols <- c(keep_cols, params$batch_column)
@@ -152,9 +157,39 @@ if (length(present_cols) != length(keep_cols)) {
 # Subset to the required columns
 samples <- samples[, present_cols, drop = FALSE]
 
-# Cleanup column values
-samples[[params$sample_column]] <- gsub("-", "_", samples[[params$sample_column]])
-samples[[params$group_column]]  <- gsub("-", "_", samples[[params$group_column]])
+# Sanitize IDs used by DEG so hyphens cannot break model terms / matching
+sanitize_hyphenated_values <- function(values, label) {
+  values_chr <- as.character(values)
+  has_hyphen <- grepl("-", values_chr, fixed = TRUE)
+  if (any(has_hyphen, na.rm = TRUE)) {
+    unique_bad <- unique(values_chr[has_hyphen])
+    preview <- paste(head(unique_bad, 10), collapse = ", ")
+    if (length(unique_bad) > 10) {
+      preview <- paste0(preview, ", ...")
+    }
+    print(glue::glue(
+      "⚠️ Warning: {sum(has_hyphen, na.rm = TRUE)} {label} value(s) contained hyphens and were converted to underscores. Examples: {preview}"
+    ))
+  }
+  gsub("-", "_", values_chr, fixed = TRUE)
+}
+
+assert_no_hyphens <- function(values, label) {
+  values_chr <- as.character(values)
+  bad <- unique(values_chr[grepl("-", values_chr, fixed = TRUE)])
+  if (length(bad) > 0) {
+    bad_preview <- paste(head(bad, 10), collapse = ", ")
+    if (length(bad) > 10) {
+      bad_preview <- paste0(bad_preview, ", ...")
+    }
+    stop(glue::glue(
+      "❌ Found hyphens in {label} after sanitization: {bad_preview}. Replace '-' with '_' before running DEG."
+    ))
+  }
+}
+
+samples[[params$sample_column]] <- sanitize_hyphenated_values(samples[[params$sample_column]], "sampleName")
+samples[[params$group_column]]  <- sanitize_hyphenated_values(samples[[params$group_column]], "groupName")
 
 # Read the counts matrix
 counts_data <- read.table(params$counts_file,
@@ -162,7 +197,20 @@ counts_data <- read.table(params$counts_file,
                      row.names = 1, 
                      sep = "\t", 
                      header = TRUE)
-colnames(counts_data) <- gsub("-", "_", colnames(counts_data))
+counts_colnames_before <- colnames(counts_data)
+counts_colnames_after <- gsub("-", "_", counts_colnames_before, fixed = TRUE)
+changed_sample_cols <- sum(counts_colnames_before != counts_colnames_after)
+if (changed_sample_cols > 0) {
+  print(glue::glue(
+    "⚠️ Warning: {changed_sample_cols} counts matrix column name(s) were converted from hyphen to underscore."
+  ))
+}
+colnames(counts_data) <- counts_colnames_after
+
+assert_no_hyphens(samples[[params$sample_column]], "samples.tsv sampleName")
+assert_no_hyphens(samples[[params$group_column]], "samples.tsv groupName")
+assert_no_hyphens(colnames(counts_data), "counts matrix column names")
+
 counts_metadata <- counts_data[, c("species", grep("^gene_", colnames(counts_data), value = TRUE))]
 sample_columns <- intersect(colnames(counts_data), samples[[params$sample_column]])
 counts <- counts_data[, sample_columns, drop = FALSE]
@@ -185,21 +233,30 @@ colnames(counts) <- gsub("-", "_", colnames(counts))
 #| warning: false
 
 # Get groups from params
-g1 <- params$group1
-g2 <- params$group2
+orig_g1 <- params$group1
+orig_g2 <- params$group2
 
-# Define color palette based on actual group names
+# sanitize the group names so they match the cleaned sample sheet
+# (sample values have hyphens converted to underscores earlier)
+g1 <- gsub("-", "_", orig_g1)
+g2 <- gsub("-", "_", orig_g2)
+
+# Define color palette based on *sanitized* group names
 group_colors <- setNames(c("#0072B2", "#D55E00"), c(g1, g2))
 
 print(glue::glue("📥 Selecting samples in groups: "))
-print(glue::glue(g1, " and "))
-print(glue::glue(g2))
+print(glue::glue(orig_g1, " and "))
+print(glue::glue(orig_g2))
+if (g1 != orig_g1 || g2 != orig_g2) {
+  print(glue::glue("⚠️ Hyphens in group names replaced with underscores internally: ",
+                   orig_g1, "→", g1, "; ", orig_g2, "→", g2))
+}
 
-# Filter the samplesheet to only include samples from group1 and group2
+# Filter the samplesheet to only include samples from the (sanitized) groups
 selected_samples <- samples[samples[[params$group_column]] %in% c(g1, g2), ]
 
-# Get the sample IDs (assuming there's a 'sample' column)
-sample_ids <- selected_samples$sample
+# Get sample IDs using the configured sample column
+sample_ids <- selected_samples[[params$sample_column]]
 
 # Now subset the counts matrix
 # Ensure sample columns in counts match sample IDs
@@ -378,12 +435,19 @@ print(glue::glue("📦 Newly filtered counts matrix: ", nrow(ready_for_deg_raw_c
 # Check unique group levels in the samplesheet
 valid_groups <- unique(samples[[params$group_column]])
 
-# Find missing groups
+# Find missing groups (use sanitized values g1/g2)
 missing_groups <- setdiff(c(g1, g2), valid_groups)
 
 if (length(missing_groups) > 0) {
-  stop(paste0("❌ Group(s) from params not found in samples[[params$group_column]]\n",
-       paste(missing_groups, collapse = ", ")))
+  # Format available groups and missing ones with quotes for clarity
+  allowed <- paste(shQuote(valid_groups), collapse = ", ")
+  missing <- paste(shQuote(missing_groups), collapse = ", ")
+  stop(paste0(
+    "❌ Group(s) from params not found in samples[[params$group_column]]\n",
+    "Allowed groups (after sanitization): ", allowed, "\n",
+    "Missing group(s): ", missing, "\n",
+    "⚠️ Note: hyphens in group names are converted to underscores for matching."
+  ))
 } else {
   print(glue::glue("✅ Both group1(",g1,") and group2(",g2,") are present in samplesheet."))
   
@@ -912,7 +976,7 @@ add_gsea_rank_score <- function(df) {
     full_rank_colnames <- colnames(raw_design)[rank_cols]
     
     # Ensure both group1 and group2 are included
-    required_cols <- c(params$group1, params$group2)
+    required_cols <- c(g1, g2)
     missing_required <- setdiff(required_cols, full_rank_colnames)
     
     # If any required contrast col is missing, replace a non-required one
@@ -934,7 +998,7 @@ add_gsea_rank_score <- function(df) {
     limma_design <- group_design
   }
   # Build contrast string from group levels (column names in this case)
-  contrast_str <- paste0(params$group1, " - ", params$group2)
+  contrast_str <- paste0(g1, " - ", g2)
   
   # Make contrasts using new combined design
   contrast_matrix <- makeContrasts(
@@ -2488,4 +2552,3 @@ if (is.null(venn_input) || ncol(venn_input) == 0 || nrow(venn_input) == 0) {
 <!-- exit_gracefully() -->
 <!-- print(glue::glue(" Exiting early: Debugging script intentionally halted.")) -->
 <!-- ``` -->
-

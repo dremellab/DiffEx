@@ -19,3 +19,5 @@ renv/python/
 renv/staging/
 .Rproj.user
 build.log
+.Rhistory
+*.Rhistory

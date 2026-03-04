@@ -69,6 +69,15 @@ def _ensure_writable(path: Path, what: str = "folder") -> None:
     if not os.access(path, os.W_OK):
         typer.secho(f"❌ {what.capitalize()} not writable: {path}", fg=typer.colors.RED)
         raise typer.Exit(code=2)
+
+def _sanitize_group_label(group: str, opt_name: str) -> str:
+    sanitized = group.replace("-", "_")
+    if sanitized != group:
+        typer.secho(
+            f"⚠️ {opt_name} contained hyphens and was normalized internally: '{group}' -> '{sanitized}'",
+            fg=typer.colors.YELLOW,
+        )
+    return sanitized
     
 def _caller_func_name() -> str:
     """
@@ -281,6 +290,8 @@ def deg(
     counts_file = counts_file.resolve()
     samplesheet = samplesheet.resolve()
     outdir = outdir.resolve()
+    group1 = _sanitize_group_label(group1, "--group1")
+    group2 = _sanitize_group_label(group2, "--group2")
 
     # Ensure files exist and are readable
     _ensure_readable(counts_file, "Counts file")

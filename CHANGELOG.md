@@ -1,6 +1,18 @@
-# dev version
+# v0.5.4
 
-- Placeholder for ongoing development notes.
+**Release date:** March 4, 2026
+
+- Fixed DEG sample and group matching so hyphenated identifiers are converted to
+  underscores consistently across `samples.tsv`, counts matrix sample columns,
+  and CLI contrast group inputs.
+
+- Added explicit warnings when identifiers are normalized and a hard stop if
+  hyphens remain in sample or group values before DEG proceeds.
+
+- Fixed DEG sample selection to use the configured sample column instead of a
+  hardcoded sample field.
+
+- Updated git ignore rules to stop tracking local `.Rhistory` files.
 
 # v0.5.3
 
@@ -170,4 +182,3 @@
 ### 🧼 CLI and Code Improvements
 - CLI now resolves all input/output paths to **absolute paths**.
 - Cleaned and refactored parameter logic and naming conventions for clarity.
-

@@ -152,10 +152,19 @@ prep <- prepare_ranks(rnk)
 species <- prep$species
 ranks   <- prep$ranks
 
-# --- Sanitize ranks: remove NA/NaN/Inf and unnamed or duplicated entries ---
+# --- Sanitize ranks: clamp +Inf/-Inf, remove NA/NaN and unnamed or duplicated
+# entries ---
 # Many GSEA implementations (fgsea/clusterProfiler) expect a named numeric vector
 # of finite values. If the .rnk file contained NA/NaN/Inf or duplicate names,
 # fgsea::preparePathwaysAndStats can error with "Not all stats values are finite numbers".
+#
+# +Inf/-Inf typically come from p-value underflow (p == 0) on very strongly DE
+# genes -- a real, extreme signal rather than bad data (see issue #39). Dropping
+# those genes would erase the most significant hits from the ranked list, so
+# instead each is clamped to 2x the most extreme finite value on its side. This
+# keeps it at the extreme end of the ranking -- where an Inf-ranked gene belongs
+# -- without distorting fgsea's rank-based enrichment statistic, which only
+# depends on rank order and relative magnitude.
 
 # Ensure it's numeric (preserve names)
 if (!is.numeric(ranks)) {
@@ -163,10 +172,29 @@ if (!is.numeric(ranks)) {
   names(ranks) <- names(prep$ranks)
 }
 
-# Remove NA / NaN / Inf values
-bad_vals <- !is.finite(ranks) | is.na(ranks)
+# Clamp +Inf/-Inf to 2x the most extreme finite value on their respective side
+inf_vals <- is.infinite(ranks)
+if (any(inf_vals)) {
+  finite_ranks <- ranks[is.finite(ranks)]
+  if (length(finite_ranks) == 0) {
+    stop("GSEA: all rank values are +Inf/-Inf -- no finite values to clamp against")
+  }
+  pos_replacement <- 2 * max(finite_ranks)
+  neg_replacement <- 2 * min(finite_ranks)
+  n_pos_inf <- sum(ranks == Inf, na.rm = TRUE)
+  n_neg_inf <- sum(ranks == -Inf, na.rm = TRUE)
+  ranks[ranks == Inf]  <- pos_replacement
+  ranks[ranks == -Inf] <- neg_replacement
+  message(
+    "GSEA: clamped ", n_pos_inf, " +Inf rank(s) to ", pos_replacement,
+    " and ", n_neg_inf, " -Inf rank(s) to ", neg_replacement
+  )
+}
+
+# Remove NA / NaN values (unlike Inf, these carry no rank signal to preserve)
+bad_vals <- is.na(ranks)
 if (any(bad_vals)) {
-  message("GSEA: removing ", sum(bad_vals), " non-finite or NA rank values")
+  message("GSEA: removing ", sum(bad_vals), " NA/NaN rank values")
   ranks <- ranks[!bad_vals]
 }
 

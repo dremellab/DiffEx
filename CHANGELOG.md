@@ -1,3 +1,13 @@
+# v0.5.5
+
+**Release date:** July 19, 2026
+
+- Fixed GSEA rank sanitization to clamp +Inf/-Inf values instead of dropping them.
+  Infinite rank scores typically arise from p-value underflow on very strongly DE
+  genes (real, extreme signal). Clamping to 2× the most extreme finite value on
+  each side preserves the gene's position in the ranked list while keeping values
+  finite for `fgsea` compatibility. (Fixes #39)
+
 # v0.5.4
 
 **Release date:** March 4, 2026

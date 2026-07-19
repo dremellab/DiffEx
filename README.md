@@ -46,14 +46,14 @@ Built with ❤️ for users of the **HAROLD RNA-seq** pipeline, DiffEx consumes 
 git clone https://github.com/dremellab/DiffEx.git
 cd DiffEx
 
-# build the image (v0.5.1)
-docker buildx build --build-arg DIFFEX_COMMIT=v0.5.1 -t dremellab/diffex:0.5.1 .
+# build the image (v0.5.5)
+docker buildx build --build-arg DIFFEX_COMMIT=v0.5.5 -t seqinfomics/diffex:0.5.5 .
 ```
 
 ### 🧫 **Using Apptainer/Singularity**
 
 ```bash
-apptainer build diffex.sif docker-daemon://dremellab/diffex:0.5.1
+apptainer build diffex.sif docker-daemon://seqinfomics/diffex:0.5.5
 apptainer exec diffex.sif quarto render diffex/diffex.qmd
 ```
 

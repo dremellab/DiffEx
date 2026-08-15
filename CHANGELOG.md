@@ -1,4 +1,6 @@
-# Unreleased
+# v0.5.6
+
+**Release date:** August 14, 2026
 
 - Standardized differential expression results file format across DESeq2, limma, and
   edgeR. All three per-method output TSVs now include gene annotation columns

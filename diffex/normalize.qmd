@@ -458,17 +458,50 @@ for (s in colnames(pseudo_log2_normalized_counts)) {
 
   
   pseudo_log2_normalized_counts[pseudo_log2_normalized_counts == -Inf] <- NA
+
+  # Persist ERCC-corrected log2-scale counts (pre-normalization, all genes)
+  ercc_corrected_log2_counts_file <- file.path(counts_dir, "ERCC_corrected_log2_counts.tsv")
+
+  as.data.frame(pseudo_log2_normalized_counts) %>%
+    rownames_to_column(var = "gene") -> ercc_corrected_log2_counts_for_output
+
+  # Add metadata columns
+  if (exists("counts_metadata")) {
+    ercc_corrected_log2_counts_for_output <- merge(
+      counts_metadata, ercc_corrected_log2_counts_for_output,
+      by.x = "row.names", by.y = "gene", all.y = TRUE) %>% dplyr::rename(gene_id = Row.names)
+  }
+
+  write.table(ercc_corrected_log2_counts_for_output,
+              file = ercc_corrected_log2_counts_file,
+              sep = "\t",
+              quote = FALSE,
+              col.names = TRUE,
+              row.names = FALSE)
+  print(glue::glue("💾 ERCC-corrected log2 counts saved to: ", ercc_corrected_log2_counts_file))
+
+  # Linear-scale companion: pure inverse-log2, NAs preserved (not the /20000-rescaled,
+  # NA-zeroed pseudo_rpkm_counts used later to feed the limma/edgeR/DESeq2 models)
+  ercc_corrected_counts_file <- file.path(counts_dir, "ERCC_corrected_counts.tsv")
+
+  as.data.frame(2^pseudo_log2_normalized_counts) %>%
+    rownames_to_column(var = "gene") -> ercc_corrected_counts_for_output
+
+  if (exists("counts_metadata")) {
+    ercc_corrected_counts_for_output <- merge(
+      counts_metadata, ercc_corrected_counts_for_output,
+      by.x = "row.names", by.y = "gene", all.y = TRUE) %>% dplyr::rename(gene_id = Row.names)
+  }
+
+  write.table(ercc_corrected_counts_for_output,
+              file = ercc_corrected_counts_file,
+              sep = "\t",
+              quote = FALSE,
+              col.names = TRUE,
+              row.names = FALSE)
+  print(glue::glue("💾 ERCC-corrected linear-scale counts saved to: ", ercc_corrected_counts_file))
 }
 
-# pseudo_log2_normalized_counts_df <- as.data.frame(pseudo_log2_normalized_counts) %>%
-#   rownames_to_column(var = "gene_id")
-# 
-# write.table(pseudo_log2_normalized_counts_df,
-#             file = file.path(output_base, "ERCC_pseudo_log2normalized_counts.tsv"),
-#             sep = "\t",
-#             quote = FALSE,
-#             col.names = TRUE,
-#             row.names = FALSE)
 
 ```
 

@@ -212,6 +212,12 @@ assert_no_hyphens(samples[[params$group_column]], "samples.tsv groupName")
 assert_no_hyphens(colnames(counts_data), "counts matrix column names")
 
 counts_metadata <- counts_data[, c("species", grep("^gene_", colnames(counts_data), value = TRUE))]
+
+gene_id_annotations <- counts_metadata %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = "gene") %>%
+  dplyr::select(gene, species, gene_type)
+
 sample_columns <- intersect(colnames(counts_data), samples[[params$sample_column]])
 counts <- counts_data[, sample_columns, drop = FALSE]
 original_counts <- counts
@@ -930,20 +936,30 @@ make_volcano_plot <- function(volcano_df,
 add_gsea_rank_score <- function(df) {
   # Calculate sign of log2FoldChange
   sign_lfc <- sign(df$log2FoldChange)
-  
+
   # Compute -log10(p_value)
   logp <- -log10(df$p_value)
-  
+
   # Combine into GSEA ranking score
   df$gsea_rank_score <- sign_lfc * logp
-  
+
   # Sort by gsea_rank_score from low to high
   df <- df[order(df$gsea_rank_score), ]
-  
+
   return(df)
 }
 
 
+add_output_annotations <- function(df, gene_id_annotations) {
+  df %>%
+    dplyr::left_join(gene_id_annotations, by = "gene") %>%
+    tidyr::separate(gene, into = c("gene_id", "gene_name"),
+                     sep = "\\|", extra = "merge", fill = "right") %>%
+    dplyr::mutate(
+      neg_log10_pvalue = -log10(p_value),
+      adjusted_pvalue   = p.adjust(p_value, method = "BH")
+    )
+}
 
 ```
 
@@ -1432,7 +1448,10 @@ limma_deg_results_stats_df <- limma_deg_results_stats_df[match(c("Down", "NotSig
 # Write table to file
 fs::dir_create(limma_deg_dir)
 limma_deg_file <- file.path(limma_deg_dir, "limma_results.tsv")
-write.table(res_table_limma,
+res_table_limma_out <- add_output_annotations(res_table_limma, gene_id_annotations) %>%
+  dplyr::select(gene_id, gene_name, species, gene_type, log2FoldChange, neg_log10_pvalue,
+                FoldChange, AveExpr, p_value, FDR, adjusted_pvalue, Direction, gsea_rank_score)
+write.table(res_table_limma_out,
             file = limma_deg_file,
             sep = "\t",
             quote = FALSE,
@@ -1845,11 +1864,14 @@ deg_results_stats_df <- deg_results_stats_df[match(c("Down", "NotSig", "Up"), de
 
 # write results table to file
 results_file <- file.path(edger_deg_dir, "edgeR_results.tsv")
-write.table(res_table_edger, 
-            file = results_file, 
-            sep = "\t", 
-            quote = FALSE, 
-            col.names = TRUE, 
+res_table_edger_out <- add_output_annotations(res_table_edger, gene_id_annotations) %>%
+  dplyr::select(gene_id, gene_name, species, gene_type, log2FoldChange, neg_log10_pvalue,
+                FoldChange, logCPM, p_value, FDR, adjusted_pvalue, Direction, gsea_rank_score)
+write.table(res_table_edger_out,
+            file = results_file,
+            sep = "\t",
+            quote = FALSE,
+            col.names = TRUE,
             row.names = FALSE)
 
 print(glue::glue("💾 edgeR DE results saved to: ", results_file))
@@ -2318,12 +2340,15 @@ res_table_deseq2 <- res_table_deseq2 %>%
 
 # Save DESeq2 results to a file
 res_file <- file.path(deseq2_deg_dir, "DESeq2_results.tsv")
-write.table(res_table_deseq2, 
-            file = res_file, 
-            sep = "\t", 
-            quote = FALSE, 
-            col.names = TRUE, 
-            row.names = TRUE)
+res_table_deseq2_out <- add_output_annotations(res_table_deseq2, gene_id_annotations) %>%
+  dplyr::select(gene_id, gene_name, species, gene_type, log2FoldChange, neg_log10_pvalue,
+                FoldChange, baseMean, p_value, FDR, adjusted_pvalue, Direction, gsea_rank_score)
+write.table(res_table_deseq2_out,
+            file = res_file,
+            sep = "\t",
+            quote = FALSE,
+            col.names = TRUE,
+            row.names = FALSE)
 print(glue::glue("💾 DESeq2 results saved to: ", res_file))
 
 

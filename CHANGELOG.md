@@ -1,3 +1,18 @@
+# v0.5.6
+
+**Release date:** August 14, 2026
+
+- Standardized differential expression results file format across DESeq2, limma, and
+  edgeR. All three per-method output TSVs now include gene annotation columns
+  (`gene_id`, `gene_name`, `species`, `gene_type`), a calculated `-log10(p_value)`
+  column (`neg_log10_pvalue`), and an `adjusted_pvalue` column (recalculated via
+  Benjamini-Hochberg). Gene IDs and symbols are now split from the composite
+  input column for programmatic ease. Downstream combined results and GSEA `.rnk`
+  files remain unchanged. (Implements #42)
+
+- Fixed DESeq2 results output to remove stray index column (was using `row.names=TRUE`,
+  now `row.names=FALSE` for consistency with limma and edgeR).
+
 # v0.5.5
 
 **Release date:** July 19, 2026

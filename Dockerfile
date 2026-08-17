@@ -47,7 +47,7 @@ RUN quarto --version
 # -----------------------------------------------
 SHELL ["/bin/bash", "-lc"]
 ENV MAMBA_ROOT_PREFIX=/opt/micromamba
-RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj -C /usr/local/bin bin/micromamba --strip-components=1
+RUN curl -Ls https://github.com/mamba-org/micromamba-releases/releases/download/1.4.9-0/micromamba-1.4.9-0-linux-64.tar.bz2 | tar -xvj -C /usr/local/bin bin/micromamba --strip-components=1
 
 # -----------------------------------------------
 # Environment setup

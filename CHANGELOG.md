@@ -1,3 +1,14 @@
+# Unreleased
+
+- Persisted the ERCC-corrected counts matrices that were previously computed but not
+  written to disk. Two new outputs (only when `useERCC=TRUE`):
+  - `ERCC_corrected_log2_counts.tsv` — log2-scale ERCC-corrected counts, representing
+    the shared spike-in normalization step applied before any method-specific
+    normalization (voom/TMM/VST).
+  - `ERCC_corrected_counts.tsv` — linear-scale companion (pure inverse-log2,
+    preserving NAs), providing both scales of the pre-normalization ERCC-corrected
+    matrix for user convenience. (Implements #44)
+
 # v0.5.6
 
 **Release date:** August 14, 2026

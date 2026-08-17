@@ -1,4 +1,6 @@
-# Unreleased
+# v0.5.7
+
+**Release date:** August 17, 2026
 
 - Persisted the ERCC-corrected counts matrices that were previously computed but not
   written to disk. Two new outputs (only when `useERCC=TRUE`):

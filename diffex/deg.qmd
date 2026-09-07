@@ -49,6 +49,11 @@ params:
   edgeR_cpm_group_fraction: 0.5
   DESeq2_low_count_cutoff: 2
   DESeq2_low_count_group_fraction: 0.5
+  # rpkm_to_counts_divisor: scaling factor used when converting ERCC-corrected log2(RPKM)
+  # values back to integer counts for edgeR/DESeq2. Correct RPKM reversal uses 1.0.
+  # (Historical pipeline versions hardcoded this to 20000; kept as a parameter for
+  # traceability/backward comparison, not as a recommended alternative.)
+  rpkm_to_counts_divisor: 1.0
 
 ---
 
@@ -596,9 +601,9 @@ if (isTRUE(params$useERCC)) {
   )
   
 # Implement corrected log2RPKM = (log2RPKM - intercept) / slope (per sample)
-pseudo_log2_normalized_counts <- log2_rpkm_counts
+ercc_corrected_log2rpkm_counts <- log2_rpkm_counts
 
-for (s in colnames(pseudo_log2_normalized_counts)) {
+for (s in colnames(ercc_corrected_log2rpkm_counts)) {
   intercept <- ercc_qc$Intercept[ercc_qc$Sample == s]
   slope <- ercc_qc$Slope[ercc_qc$Sample == s]
 
@@ -608,11 +613,85 @@ for (s in colnames(pseudo_log2_normalized_counts)) {
   }
 
   # Apply transformation
-  pseudo_log2_normalized_counts[, s] <- (pseudo_log2_normalized_counts[, s] - intercept) / slope
+  ercc_corrected_log2rpkm_counts[, s] <- (ercc_corrected_log2rpkm_counts[, s] - intercept) / slope
 }
 
   
-  pseudo_log2_normalized_counts[pseudo_log2_normalized_counts == -Inf] <- NA
+  ercc_corrected_log2rpkm_counts[ercc_corrected_log2rpkm_counts == -Inf] <- NA
+}
+```
+
+```{r ercc_methodology}
+#| code-fold: true
+#| code-summary: "🧬 ERCC Normalization Methodology & Shared Helper"
+#| message: false
+#| warning: false
+#| echo: false
+
+# ════════════════════════════════════════════════════════════════════════════
+# ERCC-based normalization: external calibration applied (Approach A)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# METHODOLOGY:
+# For each sample, we fit: log2(ERCC_RPKM) ~ log2(ERCC_known_concentration)
+# This gives sample-specific slope (response efficiency) and intercept (baseline).
+#   - Slope ~0.85-1.0: how faithfully sequencing captures ERCC concentration changes.
+#     This is a RESPONSE/SENSITIVITY factor, NOT a library-size factor.
+#   - Intercept ~-15 to -18: sample-level baseline offset.
+#
+# Correction applied to ALL genes (not just ERCC):
+#   corrected_log2_RPKM = (raw_log2_RPKM - intercept) / slope
+# This inverts the calibration curve: "given this signal, what ERCC-scale
+# concentration would produce it?"
+#
+# WHY THIS APPROACH:
+# This anchors expression values to an external ERCC standard, preventing
+# DESeq2/edgeR's internal normalization (median-of-ratios / TMM) from erasing
+# genuine global transcriptional changes. Both of those methods assume the total
+# RNA pool is roughly constant across samples -- an assumption that is violated
+# in experiments such as:
+#   - Pol II / CDK9 inhibition (e.g. DRB): genuine decrease in total cellular mRNA
+#   - Transcription factor knockdown: widespread expression changes
+#   - Host+virus sequencing: viral reads can dominate composition over time
+# ERCC spike-ins are added before lysis at known concentrations and are
+# unaffected by treatment, so they provide an unbiased external reference.
+#
+# METHOD IMPLEMENTATION (when useERCC = TRUE):
+#   - limma:  uses ercc_corrected_log2rpkm_counts directly (already log2 scale,
+#             so voom is never invoked on this path -- see limma section).
+#   - edgeR:  converts corrected log2(RPKM) back to integer counts (below),
+#             then sets norm.factors = 1 to disable TMM.
+#   - DESeq2: converts corrected log2(RPKM) back to integer counts (below),
+#             then sets sizeFactors = 1 to disable median-of-ratios.
+#
+# NOTE: This was explicitly chosen over deriving edgeR/DESeq2 size factors from
+# ERCC (e.g. from ERCC library size or from the slope). The slope is a
+# sensitivity factor, not a size factor, and Sarah confirmed the goal is for
+# edgeR/DESeq2 to receive the same ERCC-corrected counts limma already uses,
+# with their own internal normalization disabled -- not to re-derive size
+# factors from ERCC and let each tool normalize as usual.
+#
+# If useERCC = FALSE, all three methods fall back to their standard
+# normalization (voom/TMM for edgeR, median-of-ratios for DESeq2).
+# ════════════════════════════════════════════════════════════════════════════
+
+# Reverses the RPKM formula to recover integer counts from ERCC-corrected
+# log2(RPKM) values, for use by edgeR and DESeq2 (which require count input).
+#   RPKM = counts / (gene_length_kb * library_size_millions)
+#   =>  counts = RPKM * gene_length_kb * library_size_millions
+#
+# `divisor` corresponds to params$rpkm_to_counts_divisor (default 1.0; the
+# historical pipeline hardcoded this to 20000 with no documented rationale).
+convert_ercc_corrected_log2rpkm_to_counts <- function(log2rpkm_matrix,
+                                                       gene_lengths,
+                                                       library_sizes,
+                                                       divisor = 1.0) {
+  corrected_rpkm <- 2^log2rpkm_matrix / divisor
+  library_sizes_millions <- library_sizes / 1e6
+  corrected_counts <- sweep(corrected_rpkm, 1, gene_lengths, "*")
+  corrected_counts <- sweep(corrected_counts, 2, library_sizes_millions, "*")
+  corrected_counts[is.na(corrected_counts)] <- 0
+  corrected_counts
 }
 ```
 
@@ -630,6 +709,79 @@ if (isTRUE(params$useERCC)) {
     rownames = FALSE,
     options = list(pageLength = 20, autoWidth = TRUE)
   )
+}
+```
+
+```{r ercc_correction_comparison}
+#| code-fold: true
+#| code-summary: "📊 ERCC Correction: Before vs After"
+#| fig.width: 10
+#| fig.height: 5
+#| out.width: "100%"
+#| fig.align: "center"
+#| message: false
+#| warning: false
+#| echo: false
+
+if (isTRUE(params$useERCC)) {
+
+  # Illustrate the effect of the slope/intercept correction using one
+  # representative sample (the first sample in the design).
+  sample_idx <- 1
+  sample_name <- colnames(log2_rpkm_counts)[sample_idx]
+
+  before_correction <- log2_rpkm_counts[, sample_idx]
+  after_correction <- ercc_corrected_log2rpkm_counts[, sample_idx]
+
+  correction_comparison <- data.frame(
+    gene = rownames(log2_rpkm_counts),
+    before = before_correction,
+    after = after_correction[rownames(log2_rpkm_counts)]
+  )
+  correction_comparison <- correction_comparison[
+    !apply(correction_comparison[, c("before", "after")], 1,
+           function(x) any(is.na(x) | is.infinite(x))),
+  ]
+  correction_comparison$type <- ifelse(
+    grepl("^ERCC", correction_comparison$gene), "ERCC", "Endogenous"
+  )
+  correction_comparison$correction_applied <-
+    correction_comparison$after - correction_comparison$before
+
+  gene_type_colors <- c("ERCC" = "#D55E00", "Endogenous" = "#0072B2")
+
+  p1 <- ggplot(correction_comparison, aes(x = before, y = after, color = type)) +
+    geom_point(alpha = 0.5, size = 1.5) +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray40") +
+    scale_color_manual(values = gene_type_colors) +
+    theme_bw() +
+    labs(
+      title = paste0("ERCC Correction (", sample_name, ")"),
+      x = "log2(RPKM) - Before",
+      y = "log2(RPKM) - After ERCC Correction",
+      color = "Gene Type"
+    )
+
+  p2 <- ggplot(correction_comparison, aes(x = correction_applied, fill = type)) +
+    geom_histogram(alpha = 0.6, bins = 30, position = "identity") +
+    scale_fill_manual(values = gene_type_colors) +
+    theme_bw() +
+    labs(
+      title = "Distribution of Correction Magnitude",
+      x = "Correction Applied (After - Before, log2 units)",
+      y = "No. of genes",
+      fill = "Gene Type"
+    )
+
+  ggpubr::ggarrange(p1, p2, ncol = 2, common.legend = TRUE, legend = "bottom")
+
+  ercc_mean_correction <- mean(correction_comparison$correction_applied[correction_comparison$type == "ERCC"])
+  endo_mean_correction <- mean(correction_comparison$correction_applied[correction_comparison$type == "Endogenous"])
+  print(glue::glue(
+    "Sample {sample_name}: mean correction (log2 units) -- ",
+    "ERCC = {format(ercc_mean_correction, digits = 3)}, ",
+    "Endogenous = {format(endo_mean_correction, digits = 3)}"
+  ))
 }
 ```
 
@@ -1026,22 +1178,22 @@ add_output_annotations <- function(df, gene_id_annotations) {
 if (isTRUE(params$useERCC)) {
   
   print(glue::glue("✅ ERCC standard curve slope - based normalization enabled."))
-  dims <- dim(pseudo_log2_normalized_counts)
+  dims <- dim(ercc_corrected_log2rpkm_counts)
   
   # get batch corrected counts
   if (isTRUE(params$usebatch)){
-    pseudo_log2_normalized_counts_batch_corrected <- limma::removeBatchEffect(
-      pseudo_log2_normalized_counts,
+    ercc_corrected_log2rpkm_counts_batch_corrected <- limma::removeBatchEffect(
+      ercc_corrected_log2rpkm_counts,
       batch = samples[[params$batch_column]],
       design = model.matrix(~ 0 + samples[[params$group_column]])
     )
-    pseudo_log2_normalized_counts_batch_corrected <- as.data.frame(pseudo_log2_normalized_counts_batch_corrected)
+    ercc_corrected_log2rpkm_counts_batch_corrected <- as.data.frame(ercc_corrected_log2rpkm_counts_batch_corrected)
   }
   
-  # Use pseudo_log2_normalized_counts for limma analysis
+  # Use ercc_corrected_log2rpkm_counts for limma analysis
   
   # fit the model
-  fit <- lmFit(pseudo_log2_normalized_counts, limma_design)
+  fit <- lmFit(ercc_corrected_log2rpkm_counts, limma_design)
   
   # run contrasts
   fit2 <- contrasts.fit(fit, contrast_matrix)
@@ -1139,12 +1291,12 @@ if (isTRUE(params$useERCC)) {
 
 
 if (isTRUE(params$useERCC)) {
-  normalized_counts_file <- file.path(counts_dir, "limma_log2normalized_pseudo_rpkm_counts.tsv")
+  normalized_counts_file <- file.path(counts_dir, "limma_ERCC_corrected_log2rpkm_counts.tsv")
   
     # Save normalized counts to a file
-  as.data.frame(pseudo_log2_normalized_counts) %>%
-    rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_for_output
-  write.table(pseudo_log2_normalized_counts_for_output,
+  as.data.frame(ercc_corrected_log2rpkm_counts) %>%
+    rownames_to_column(var = "gene") -> ercc_corrected_log2rpkm_counts_for_output
+  write.table(ercc_corrected_log2rpkm_counts_for_output,
               file = normalized_counts_file,
               sep = "\t",
               quote = FALSE,
@@ -1152,28 +1304,36 @@ if (isTRUE(params$useERCC)) {
               row.names = FALSE)
   print(glue::glue("💾 Normalized counts saved to: ", normalized_counts_file))
   
-  pseudo_rpkm_counts <- 2^pseudo_log2_normalized_counts/20000
-  pseudo_rpkm_counts[is.na(pseudo_rpkm_counts)] <- 0
-  pseudo_rpkm_counts_for_output <- as.data.frame(pseudo_rpkm_counts) %>%
+  # Reconstruct integer-scale counts from the ERCC-corrected log2(RPKM) values.
+  # This is the shared source of "ERCC-corrected counts" reused by edgeR and
+  # DESeq2 below (see convert_ercc_corrected_log2rpkm_to_counts()).
+  ercc_corrected_counts <- convert_ercc_corrected_log2rpkm_to_counts(
+    log2rpkm_matrix = ercc_corrected_log2rpkm_counts,
+    gene_lengths = merged_counts[rownames(ercc_corrected_log2rpkm_counts), "gene_length_kb"],
+    library_sizes = library_sizes[colnames(ercc_corrected_log2rpkm_counts)],
+    divisor = params$rpkm_to_counts_divisor
+  )
+  ercc_corrected_counts_for_output <- as.data.frame(ercc_corrected_counts) %>%
     rownames_to_column(var = "gene")
-  pseudo_rpkm_counts_file <- file.path(counts_dir, "limma_pseudo_rpkm_counts.tsv")
-  write.table(pseudo_rpkm_counts_for_output,
-              file = pseudo_rpkm_counts_file,
+  ercc_corrected_counts_file <- file.path(counts_dir, "ERCC_corrected_counts.tsv")
+  write.table(ercc_corrected_counts_for_output,
+              file = ercc_corrected_counts_file,
               sep = "\t",
               quote = FALSE,
               col.names = TRUE,
               row.names = FALSE)
+  print(glue::glue("💾 ERCC-corrected counts (shared by edgeR/DESeq2) saved to: ", ercc_corrected_counts_file))
   if (isTRUE(params$usebatch)) {
-    pseudo_log2_normalized_counts_batch_corrected_file <- file.path(counts_dir, "limma_log2normalized_pseudo_rpkm_counts_batch_corrected.tsv")
-    as.data.frame(pseudo_log2_normalized_counts_batch_corrected) %>%
-      rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_batch_corrected_for_output
-    write.table(pseudo_log2_normalized_counts_batch_corrected_for_output,
-                file = pseudo_log2_normalized_counts_batch_corrected_file,
+    ercc_corrected_log2rpkm_counts_batch_corrected_file <- file.path(counts_dir, "limma_ERCC_corrected_log2rpkm_counts_batch_corrected.tsv")
+    as.data.frame(ercc_corrected_log2rpkm_counts_batch_corrected) %>%
+      rownames_to_column(var = "gene") -> ercc_corrected_log2rpkm_counts_batch_corrected_for_output
+    write.table(ercc_corrected_log2rpkm_counts_batch_corrected_for_output,
+                file = ercc_corrected_log2rpkm_counts_batch_corrected_file,
                 sep = "\t",
                 quote = FALSE,
                 col.names = TRUE,
                 row.names = FALSE)
-    print(glue::glue("💾 Batch corrected normalized counts saved to: ", pseudo_log2_normalized_counts_batch_corrected_file))
+    print(glue::glue("💾 Batch corrected normalized counts saved to: ", ercc_corrected_log2rpkm_counts_batch_corrected_file))
   }
 } else {
   normalized_counts_file <- file.path(counts_dir, "limma_voom_normalized_counts.tsv")
@@ -1248,18 +1408,18 @@ violin_plot
 # Create violin plot of normalized counts
 if (isTRUE(params$useERCC)) {
   if (isTRUE(params$usebatch)) {
-    pseudo_log2_normalized_counts_batch_corrected_for_plots <- pseudo_log2_normalized_counts_batch_corrected[!apply(pseudo_log2_normalized_counts_batch_corrected, 1, function(x) any(is.na(x) | is.infinite(x))), ]
-    as.data.frame(pseudo_log2_normalized_counts_batch_corrected_for_plots) %>% rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_batch_corrected_for_plots
+    ercc_corrected_log2rpkm_counts_batch_corrected_for_plots <- ercc_corrected_log2rpkm_counts_batch_corrected[!apply(ercc_corrected_log2rpkm_counts_batch_corrected, 1, function(x) any(is.na(x) | is.infinite(x))), ]
+    as.data.frame(ercc_corrected_log2rpkm_counts_batch_corrected_for_plots) %>% rownames_to_column(var = "gene") -> ercc_corrected_log2rpkm_counts_batch_corrected_for_plots
     ylabel <- "Log2 Normalized Pseudo RPKM Counts (Batch Corrected)"
-    violin_plot <- make_violin_plot(pseudo_log2_normalized_counts_batch_corrected_for_plots,
+    violin_plot <- make_violin_plot(ercc_corrected_log2rpkm_counts_batch_corrected_for_plots,
                                      xlab = "Sample",
                                      ylab = ylabel,
                                      title = "")
   } else {
-    pseudo_log2_normalized_counts_for_plots <- pseudo_log2_normalized_counts[!apply(pseudo_log2_normalized_counts, 1, function(x) any(is.na(x) | is.infinite(x))), ]
-    as.data.frame(pseudo_log2_normalized_counts_for_plots) %>% rownames_to_column(var = "gene") -> pseudo_log2_normalized_counts_for_plots
+    ercc_corrected_log2rpkm_counts_for_plots <- ercc_corrected_log2rpkm_counts[!apply(ercc_corrected_log2rpkm_counts, 1, function(x) any(is.na(x) | is.infinite(x))), ]
+    as.data.frame(ercc_corrected_log2rpkm_counts_for_plots) %>% rownames_to_column(var = "gene") -> ercc_corrected_log2rpkm_counts_for_plots
     ylabel <- "Log2 Normalized Pseudo RPKM Counts"
-    violin_plot <- make_violin_plot(pseudo_log2_normalized_counts_for_plots,
+    violin_plot <- make_violin_plot(ercc_corrected_log2rpkm_counts_for_plots,
                                      xlab = "Sample",
                                      ylab = ylabel,
                                      title = "")
@@ -1331,10 +1491,10 @@ pcas_before$pca2d
 #| warning: false
 if (isTRUE(params$useERCC)) {
     if (isTRUE(params$usebatch)) {
-    pcas_after <- make_pca_plots(pseudo_log2_normalized_counts_batch_corrected_for_plots,
+    pcas_after <- make_pca_plots(ercc_corrected_log2rpkm_counts_batch_corrected_for_plots,
                                title = "PCA Plot of Log2 Normalized Pseudo RPKM Counts (Batch corrected)")
   } else {
-    pcas_after <- make_pca_plots(pseudo_log2_normalized_counts_for_plots,
+    pcas_after <- make_pca_plots(ercc_corrected_log2rpkm_counts_for_plots,
                                title = "PCA Plot of Log2 Normalized Pseudo RPKM Counts")
   }  
 } else {
@@ -1406,13 +1566,13 @@ pcas_after$pca3d
 
 if (isTRUE(params$useERCC)) {
 
-pseudo_log2_normalized_counts <- 
-    pseudo_log2_normalized_counts %>%
+ercc_corrected_log2rpkm_counts <- 
+    ercc_corrected_log2rpkm_counts %>%
     as.data.frame() %>%
     {rownames(.) <- NULL; .} 
 
 # Add average log2 expression per gene
-top_genes$AveExpr <- rowMeans(pseudo_log2_normalized_counts[rownames(top_genes), , drop = FALSE])
+top_genes$AveExpr <- rowMeans(ercc_corrected_log2rpkm_counts[rownames(top_genes), , drop = FALSE])
 
 }
 
@@ -1513,7 +1673,10 @@ volcano_plotly
 #| warning: false
 
 if (isTRUE(params$useERCC)) {
-  ready_for_deg_raw_counts <- round(pseudo_rpkm_counts)
+  # Use ERCC-corrected counts (see ercc_methodology chunk) in place of raw
+  # counts, so edgeR's dispersion/filtering operate on the ERCC-calibrated scale.
+  ready_for_deg_raw_counts <- round(ercc_corrected_counts)
+  print(glue::glue("✅ Using ERCC-corrected counts as input to edgeR (divisor = {params$rpkm_to_counts_divisor})."))
 }
 
 dge_edger <- DGEList(counts = ready_for_deg_raw_counts, samples = samples, group = samples[[params$group_column]])
@@ -1551,13 +1714,17 @@ print(glue::glue("🔍 ERCC genes after filtering: ", nercc_genes_kept))
 #| warning: false
 
 dge_final <- dge_filtered
-dge_final <- calcNormFactors(dge_filtered)
 
 if (isTRUE(params$useERCC)) {
-  print(glue::glue("✅ Using ERCC-normalized pseudo RPKM counts from limma analysis."))
+  # ERCC-corrected counts already carry the external calibration -- disabling
+  # TMM here (norm.factors = 1) prevents edgeR from re-normalizing against
+  # endogenous genes and erasing genuine global transcriptional changes.
+  # See ercc_methodology chunk above for the full rationale.
+  print(glue::glue("✅ ERCC-corrected counts: disabling edgeR's TMM normalization (norm.factors = 1)."))
   dge_final$samples$norm.factors <- rep(1, ncol(dge_final))
 } else {
   print(glue::glue("ℹ️ Using TMM normalization."))
+  dge_final <- calcNormFactors(dge_final)
 }
 ```
 
@@ -1595,10 +1762,20 @@ if (isTRUE(params$useERCC)) {
 #| message: true
 #| warning: false
 # Save normalized counts to a file
+# NOTE: when useERCC=TRUE, dge_final$samples$norm.factors is fixed at 1 (see
+# setup_edger chunk), so this logCPM already reflects ERCC-corrected counts
+# rather than TMM-normalized library sizes.
 normalized_counts_edger <- as.data.frame(cpm(dge_final, normalized.lib.sizes = TRUE, log = TRUE))
 normalized_counts_edger %>%
   rownames_to_column(var = "gene") -> normalized_counts_edger_for_plots
-normalized_counts_file <- file.path(counts_dir, "edgeR_TMM_normalized_logCPM_counts.tsv")
+
+if (isTRUE(params$useERCC)) {
+  normalized_counts_file <- file.path(counts_dir, "edgeR_ERCC_corrected_logCPM_counts.tsv")
+  normalized_counts_note <- "logCPM of ERCC-corrected counts (norm.factors = 1; TMM disabled)"
+} else {
+  normalized_counts_file <- file.path(counts_dir, "edgeR_TMM_normalized_logCPM_counts.tsv")
+  normalized_counts_note <- "TMM-normalized logCPM counts"
+}
 write.table(normalized_counts_edger_for_plots,
             file = normalized_counts_file,
             sep = "\t",
@@ -1606,6 +1783,7 @@ write.table(normalized_counts_edger_for_plots,
             col.names = TRUE,
             row.names = FALSE)
 print(glue::glue("💾 Normalized counts saved to: ", normalized_counts_file))
+print(glue::glue("   Type: {normalized_counts_note}"))
 
 if (isTRUE(params$usebatch)) {
 
@@ -1625,7 +1803,11 @@ if (isTRUE(params$usebatch)) {
   normalized_counts_edger_batch_corrected <- as.data.frame(sva::ComBat(dat = normalized_counts_edger, batch = batch, mod = mod, par.prior = TRUE))
   normalized_counts_edger_batch_corrected %>%
     rownames_to_column(var = "gene") -> normalized_counts_edger_for_plots
-  normalized_counts_file_batch_corrected <- file.path(counts_dir, "edgeR_TMM_normalized_logCPM_counts_batch_corrected.tsv")
+  if (isTRUE(params$useERCC)) {
+    normalized_counts_file_batch_corrected <- file.path(counts_dir, "edgeR_ERCC_corrected_logCPM_counts_batch_corrected.tsv")
+  } else {
+    normalized_counts_file_batch_corrected <- file.path(counts_dir, "edgeR_TMM_normalized_logCPM_counts_batch_corrected.tsv")
+  }
   write.table(normalized_counts_edger_for_plots,
               file = normalized_counts_file_batch_corrected,
               sep = "\t",
@@ -1983,8 +2165,11 @@ volcano_plotly
 
 # get original filtered counts
 if (isTRUE(params$useERCC)) {
-  ready_for_deg_raw_counts <- round(pseudo_rpkm_counts)
-} 
+  # Use ERCC-corrected counts (see ercc_methodology chunk) in place of raw
+  # counts, so DESeq2's dispersion/filtering operate on the ERCC-calibrated scale.
+  ready_for_deg_raw_counts <- round(ercc_corrected_counts)
+  print(glue::glue("✅ Using ERCC-corrected counts as input to DESeq2 (divisor = {params$rpkm_to_counts_divisor})."))
+}
 
 is_ercc <- grepl("^ERCC", rownames(ready_for_deg_raw_counts))
 is_endogenous <- !is_ercc
@@ -2027,7 +2212,12 @@ dds <- DESeqDataSetFromMatrix(countData = ready_for_deg_raw_counts[keep_genes_de
                               design = design_formula)
 
 if (isTRUE(params$useERCC)) {
-  print(glue("🧪 ERCC slope based normalization will be applied"))
+  # ERCC-corrected counts already carry the external calibration -- disabling
+  # DESeq2's size factor estimation here (sizeFactors = 1) prevents DESeq2 from
+  # re-normalizing against endogenous genes (median-of-ratios) and erasing
+  # genuine global transcriptional changes. See ercc_methodology chunk above
+  # for the full rationale.
+  print(glue("✅ ERCC-corrected counts: disabling DESeq2's size factor estimation (sizeFactors = 1)."))
   sizeFactors(dds) <- rep(1, ncol(dds))
 } else {
   print(glue("📏 Default DESeq2 size factor normalization"))
@@ -2081,6 +2271,9 @@ if (isTRUE(params$useERCC)) {
 # Run variance-stabilizing transformation and extract assay
 # use the more robust `varianceStabilizingTransformation()` which works
 # for small or low-count datasets where `vst()` may fail
+# NOTE: when useERCC=TRUE, sizeFactors(dds) is fixed at 1 (see
+# deseq2_normalization chunk), so this VST already reflects ERCC-corrected
+# counts rather than median-of-ratios normalized counts.
 vst_obj <- varianceStabilizingTransformation(dds, blind = TRUE)
 normalized_counts_deseq2 <- assay(vst_obj) %>% as.data.frame()
 
@@ -2089,7 +2282,13 @@ normalized_counts_deseq2_for_plots <- normalized_counts_deseq2 %>%
   tibble::rownames_to_column(var = "gene")
 
 # Define output file path
-normalized_counts_deseq2_file <- file.path(counts_dir, "DESeq2_vst_normalized_counts.tsv")
+if (isTRUE(params$useERCC)) {
+  normalized_counts_deseq2_file <- file.path(counts_dir, "DESeq2_ERCC_corrected_VST_normalized_counts.tsv")
+  normalized_counts_deseq2_note <- "VST of ERCC-corrected counts (sizeFactors = 1; median-of-ratios disabled)"
+} else {
+  normalized_counts_deseq2_file <- file.path(counts_dir, "DESeq2_vst_normalized_counts.tsv")
+  normalized_counts_deseq2_note <- "VST of standard median-of-ratios normalized counts"
+}
 
 # Write to file
 write.table(normalized_counts_deseq2_for_plots,
@@ -2100,6 +2299,7 @@ write.table(normalized_counts_deseq2_for_plots,
             row.names = FALSE)
 
 print(glue::glue("💾 DESeq2 normalized counts saved to: {normalized_counts_deseq2_file}"))
+print(glue::glue("   Type: {normalized_counts_deseq2_note}"))
 
 if (isTRUE(params$usebatch)){
   
@@ -2121,7 +2321,11 @@ if (isTRUE(params$usebatch)){
     tibble::rownames_to_column(var = "gene")
   
   # Define output file path
-  normalized_counts_deseq2_file_batch_corrected <- file.path(counts_dir, "DESeq2_vst_normalized_counts_batch_corrected.tsv")
+  if (isTRUE(params$useERCC)) {
+    normalized_counts_deseq2_file_batch_corrected <- file.path(counts_dir, "DESeq2_ERCC_corrected_VST_normalized_counts_batch_corrected.tsv")
+  } else {
+    normalized_counts_deseq2_file_batch_corrected <- file.path(counts_dir, "DESeq2_vst_normalized_counts_batch_corrected.tsv")
+  }
   
   # Write to file
   write.table(normalized_counts_deseq2_for_plots,
@@ -2424,6 +2628,48 @@ volcano_plotly <- make_volcano_plot(volcano_df_deseq2,
                               FDR_column_name = "FDR")
 #
 volcano_plotly
+```
+
+## ERCC Normalization Summary
+
+```{r ercc_summary}
+#| code-fold: true
+#| code-summary: "🧬 ERCC Normalization Summary (All Methods)"
+#| message: true
+#| warning: false
+#| echo: false
+
+if (isTRUE(params$useERCC)) {
+  print(glue::glue("
+════════════════════════════════════════════════════════════════════════════
+✅ ERCC-BASED NORMALIZATION SUMMARY (All Three Methods)
+════════════════════════════════════════════════════════════════════════════
+
+COMMON SOURCE: limma, edgeR, and DESeq2 all used ERCC-corrected expression
+values as their starting point (see ercc_methodology chunk near the top of
+this report for full rationale).
+
+ERCC CALIBRATION (per-sample linear fit: log2(ERCC_RPKM) ~ log2(known ERCC concentration)):
+  - Slope (response/sensitivity factor):  mean = {format(mean(ercc_qc$Slope), digits = 3)}, sd = {format(sd(ercc_qc$Slope), digits = 3)}
+  - Intercept (sample baseline offset):    mean = {format(mean(ercc_qc$Intercept), digits = 3)}, sd = {format(sd(ercc_qc$Intercept), digits = 3)}
+  - Correction: corrected_log2_RPKM = (raw_log2_RPKM - intercept) / slope
+  - rpkm_to_counts_divisor used for edgeR/DESeq2 count reconstruction: {params$rpkm_to_counts_divisor}
+
+METHOD-SPECIFIC IMPLEMENTATION:
+  1. limma:  input = ERCC-corrected log2(RPKM); no voom; standard lmFit/eBayes.
+  2. edgeR:  input = ERCC-corrected integer counts; norm.factors = 1 (TMM disabled).
+  3. DESeq2: input = ERCC-corrected integer counts; sizeFactors = 1 (median-of-ratios disabled).
+
+WHY: Default normalization (TMM, median-of-ratios) assumes a roughly constant
+total RNA pool across samples. That assumption breaks down under genuine
+global transcriptional shifts (e.g. Pol II/CDK9 inhibition, host+virus
+composition shifts), where default normalization would otherwise re-normalize
+away real biological signal. ERCC spike-ins are added before lysis at known
+concentrations and are unaffected by treatment, providing an external,
+treatment-independent scale that all three methods now share.
+════════════════════════════════════════════════════════════════════════════
+  "))
+}
 ```
 
 # Combined DEG Results

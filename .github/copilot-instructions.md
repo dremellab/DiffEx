@@ -29,6 +29,8 @@ This path keeps all Superpowers content within your workspace, preventing permis
 
 ## Project Instructions
 
-Read and follow `CLAUDE.md` in the repository root before making changes or recommendations.
+Read and follow the repository-root `CLAUDE.md` before doing any work.
 
-Treat `CLAUDE.md` as the primary source for project-specific conventions, reference documentation, analysis rules, and workflow guidance.
+When `CLAUDE.md` directs you to documentation in `reference_docs/`, inspect the relevant local reference documents before making methodological recommendations or modifying analysis code.
+
+Treat `CLAUDE.md` as the canonical project instruction file.

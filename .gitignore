@@ -23,3 +23,8 @@ build.log
 *.Rhistory
 **/*ercc.md
 plans/
+testing/
+.superpowers
+.superpowers-installer
+.claude/
+.serena/

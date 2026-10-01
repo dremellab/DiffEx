@@ -49,11 +49,23 @@ params:
   edgeR_cpm_group_fraction: 0.5
   DESeq2_low_count_cutoff: 2
   DESeq2_low_count_group_fraction: 0.5
-  # rpkm_to_counts_divisor: scaling factor used when converting ERCC-corrected log2(RPKM)
-  # values back to integer counts for edgeR/DESeq2. Correct RPKM reversal uses 1.0.
-  # (Historical pipeline versions hardcoded this to 20000; kept as a parameter for
-  # traceability/backward comparison, not as a recommended alternative.)
-  rpkm_to_counts_divisor: 1.0
+  # rpkm_to_counts_divisor: empirical scaling constant used when converting
+  # ERCC-corrected values back to a count-like scale for edgeR/DESeq2.
+  #
+  # IMPORTANT: despite the "RPKM" in the variable names, the slope/intercept
+  # correction (corrected = (raw_log2_RPKM - intercept) / slope) is the ERCC
+  # calibration curve inverted for x -- i.e. it estimates log2(molecules) on
+  # the ERCC standard-curve scale, NOT a corrected RPKM value. This is why a
+  # scaling constant is needed at all: 2^(corrected value) alone can be in the
+  # hundreds of millions (matching the ERCC standard's molecule range), far
+  # larger than a realistic per-gene read count. Dividing by this constant
+  # brings values back into a range edgeR/DESeq2 can treat as counts without
+  # integer overflow or destabilizing dispersion estimation.
+  #
+  # This constant is empirical/dataset-dependent, not a principled unit
+  # conversion -- kept at its historical default (20000) pending a proper
+  # re-derivation of the ERCC-to-counts scaling with Sarah.
+  rpkm_to_counts_divisor: 20000
 
 ---
 
@@ -656,18 +668,32 @@ for (s in colnames(ercc_corrected_log2rpkm_counts)) {
 # ERCC spike-ins are added before lysis at known concentrations and are
 # unaffected by treatment, so they provide an unbiased external reference.
 #
+# IMPORTANT NAMING CAVEAT: variables in this pipeline are named
+# ercc_corrected_log2rpkm_counts / "corrected log2(RPKM)" for historical
+# reasons, but that name is misleading. The correction formula
+#   corrected = (raw_log2_RPKM - intercept) / slope
+# is the calibration line y = intercept + slope*x solved for x -- i.e. it
+# estimates log2(molecules) on the ERCC standard-curve scale (x-axis of the
+# calibration fit), NOT a corrected RPKM value. 2^(corrected value) can
+# legitimately be in the hundreds of millions (the ERCC standards themselves
+# span ~170 to ~360 million molecules), which is why a naive "reverse the
+# RPKM formula" conversion back to counts (multiplying by gene length and
+# library size) blows these values up further and overflows R's integer
+# range when handed to DESeq2. See convert_ercc_corrected_log2rpkm_to_counts()
+# below for how this is actually handled.
+#
 # METHOD IMPLEMENTATION (when useERCC = TRUE):
 #   - limma:  uses ercc_corrected_log2rpkm_counts directly (already log2 scale,
 #             so voom is never invoked on this path -- see limma section).
-#   - edgeR:  converts corrected log2(RPKM) back to integer counts (below),
+#   - edgeR:  rescales corrected values to a count-like scale (below),
 #             then sets norm.factors = 1 to disable TMM.
-#   - DESeq2: converts corrected log2(RPKM) back to integer counts (below),
+#   - DESeq2: rescales corrected values to a count-like scale (below),
 #             then sets sizeFactors = 1 to disable median-of-ratios.
 #
 # NOTE: This was explicitly chosen over deriving edgeR/DESeq2 size factors from
 # ERCC (e.g. from ERCC library size or from the slope). The slope is a
 # sensitivity factor, not a size factor, and Sarah confirmed the goal is for
-# edgeR/DESeq2 to receive the same ERCC-corrected counts limma already uses,
+# edgeR/DESeq2 to receive the same ERCC-corrected values limma already uses,
 # with their own internal normalization disabled -- not to re-derive size
 # factors from ERCC and let each tool normalize as usual.
 #
@@ -675,21 +701,19 @@ for (s in colnames(ercc_corrected_log2rpkm_counts)) {
 # normalization (voom/TMM for edgeR, median-of-ratios for DESeq2).
 # ════════════════════════════════════════════════════════════════════════════
 
-# Reverses the RPKM formula to recover integer counts from ERCC-corrected
-# log2(RPKM) values, for use by edgeR and DESeq2 (which require count input).
-#   RPKM = counts / (gene_length_kb * library_size_millions)
-#   =>  counts = RPKM * gene_length_kb * library_size_millions
+# Rescales ERCC-corrected values (see naming caveat above -- these are
+# molecule-scale, not RPKM) down to a count-like magnitude for edgeR/DESeq2,
+# which require integer count input.
 #
-# `divisor` corresponds to params$rpkm_to_counts_divisor (default 1.0; the
-# historical pipeline hardcoded this to 20000 with no documented rationale).
+# `divisor` corresponds to params$rpkm_to_counts_divisor (default 20000,
+# matching the historical pipeline value). This is an empirical scaling
+# constant, not a principled unit conversion -- it exists only to keep
+# values in a range edgeR/DESeq2 can handle without integer overflow or
+# destabilizing dispersion estimation. Revisit if/when the ERCC-to-counts
+# scaling is properly re-derived.
 convert_ercc_corrected_log2rpkm_to_counts <- function(log2rpkm_matrix,
-                                                       gene_lengths,
-                                                       library_sizes,
-                                                       divisor = 1.0) {
-  corrected_rpkm <- 2^log2rpkm_matrix / divisor
-  library_sizes_millions <- library_sizes / 1e6
-  corrected_counts <- sweep(corrected_rpkm, 1, gene_lengths, "*")
-  corrected_counts <- sweep(corrected_counts, 2, library_sizes_millions, "*")
+                                                       divisor = 20000) {
+  corrected_counts <- 2^log2rpkm_matrix / divisor
   corrected_counts[is.na(corrected_counts)] <- 0
   corrected_counts
 }
@@ -1304,13 +1328,12 @@ if (isTRUE(params$useERCC)) {
               row.names = FALSE)
   print(glue::glue("💾 Normalized counts saved to: ", normalized_counts_file))
   
-  # Reconstruct integer-scale counts from the ERCC-corrected log2(RPKM) values.
+  # Rescale ERCC-corrected (molecule-scale) values to a count-like magnitude.
   # This is the shared source of "ERCC-corrected counts" reused by edgeR and
-  # DESeq2 below (see convert_ercc_corrected_log2rpkm_to_counts()).
+  # DESeq2 below (see convert_ercc_corrected_log2rpkm_to_counts() and the
+  # naming caveat in the ercc_methodology chunk above).
   ercc_corrected_counts <- convert_ercc_corrected_log2rpkm_to_counts(
     log2rpkm_matrix = ercc_corrected_log2rpkm_counts,
-    gene_lengths = merged_counts[rownames(ercc_corrected_log2rpkm_counts), "gene_length_kb"],
-    library_sizes = library_sizes[colnames(ercc_corrected_log2rpkm_counts)],
     divisor = params$rpkm_to_counts_divisor
   )
   ercc_corrected_counts_for_output <- as.data.frame(ercc_corrected_counts) %>%
@@ -1323,6 +1346,30 @@ if (isTRUE(params$useERCC)) {
               col.names = TRUE,
               row.names = FALSE)
   print(glue::glue("💾 ERCC-corrected counts (shared by edgeR/DESeq2) saved to: ", ercc_corrected_counts_file))
+
+  # Data-driven reference divisor (diagnostic only -- does not change what's
+  # actually used unless rpkm_to_counts_divisor is set to this value).
+  #
+  # rpkm_to_counts_divisor is a single dataset-wide constant applied
+  # identically to every sample, so it rescales magnitude only -- it does NOT
+  # re-equalize samples the way per-sample library-size normalization would,
+  # so a genuine global shift (e.g. from DRB) is preserved either way. What
+  # it DOES affect is whether edgeR/DESeq2 see numbers in a realistic
+  # sequencing-depth range, which matters for their dispersion modeling.
+  #
+  # This computes the ratio that would rescale the grand total of the
+  # ERCC-corrected (molecule-scale) values to match the grand total of the
+  # actual observed raw read counts in this dataset, i.e.:
+  #   divisor = sum(2^ercc_corrected_log2rpkm_counts) / sum(raw read counts)
+  # `ready_for_deg_raw_counts` at this point in the pipeline is still the
+  # untouched original raw count matrix (ERCC substitution happens later, in
+  # the edgeR/DESeq2 sections).
+  data_driven_divisor <- sum(2^ercc_corrected_log2rpkm_counts, na.rm = TRUE) /
+    sum(ready_for_deg_raw_counts, na.rm = TRUE)
+  print(glue::glue(
+    "ℹ️ Data-driven reference divisor for this dataset: {format(data_driven_divisor, digits = 6, scientific = TRUE)} ",
+    "(currently using rpkm_to_counts_divisor = {params$rpkm_to_counts_divisor})"
+  ))
   if (isTRUE(params$usebatch)) {
     ercc_corrected_log2rpkm_counts_batch_corrected_file <- file.path(counts_dir, "limma_ERCC_corrected_log2rpkm_counts_batch_corrected.tsv")
     as.data.frame(ercc_corrected_log2rpkm_counts_batch_corrected) %>%

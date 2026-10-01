@@ -12,6 +12,10 @@ DiffEx.html
 normalized_counts.tsv
 diffex/DiffEx_cache/
 diffex/DiffEx_files/
+diffex/deg.html
+diffex/deg_files/
+diffex/normalize.html
+diffex/normalize_files/
 diffex/run.sh
 results*/
 renv/library/

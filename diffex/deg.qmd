@@ -66,6 +66,14 @@ params:
   # conversion -- kept at its historical default (20000) pending a proper
   # re-derivation of the ERCC-to-counts scaling with Sarah.
   rpkm_to_counts_divisor: 20000
+  # ercc_divisor_mode: how the divisor above is chosen when useERCC = TRUE.
+  #   "fixed": use rpkm_to_counts_divisor as given (historical behavior).
+  #   "auto":  derive a single dataset-wide divisor from the data so the grand
+  #            total of the rescaled values equals the grand total of the real
+  #            read counts: sum(2^corrected) / sum(raw counts). This keeps the
+  #            implied Poisson (shot-noise) term of the NB model on a realistic
+  #            scale without re-normalizing samples relative to each other.
+  ercc_divisor_mode: "fixed"
 
 ---
 
@@ -705,8 +713,9 @@ for (s in colnames(ercc_corrected_log2rpkm_counts)) {
 # molecule-scale, not RPKM) down to a count-like magnitude for edgeR/DESeq2,
 # which require integer count input.
 #
-# `divisor` corresponds to params$rpkm_to_counts_divisor (default 20000,
-# matching the historical pipeline value). This is an empirical scaling
+# `divisor` comes from resolve_ercc_divisor(): params$rpkm_to_counts_divisor
+# (default 20000, the historical pipeline value) in ercc_divisor_mode = "fixed",
+# or a data-driven value in "auto". This is an empirical scaling
 # constant, not a principled unit conversion -- it exists only to keep
 # values in a range edgeR/DESeq2 can handle without integer overflow or
 # destabilizing dispersion estimation. Revisit if/when the ERCC-to-counts
@@ -714,8 +723,31 @@ for (s in colnames(ercc_corrected_log2rpkm_counts)) {
 convert_ercc_corrected_log2rpkm_to_counts <- function(log2rpkm_matrix,
                                                        divisor = 20000) {
   corrected_counts <- 2^log2rpkm_matrix / divisor
+  if (any(corrected_counts > .Machine$integer.max, na.rm = TRUE)) {
+    stop(glue::glue(
+      "❌ ERCC divisor {format(divisor, digits = 6)} gives values above the R integer limit ",
+      "({.Machine$integer.max}); use a larger divisor or ercc_divisor_mode = 'auto'."
+    ))
+  }
   corrected_counts[is.na(corrected_counts)] <- 0
   corrected_counts
+}
+
+# Resolves the divisor used by convert_ercc_corrected_log2rpkm_to_counts().
+#   mode "fixed": returns `fixed_divisor` unchanged.
+#   mode "auto":  returns sum(2^corrected) / sum(raw counts), computed over the
+#                 same genes and samples in both sums. Zero-count entries are NA
+#                 in `corrected_matrix` and 0 in `raw_counts`, so they add 0 to
+#                 both. A single constant, applied identically to every sample.
+resolve_ercc_divisor <- function(mode, fixed_divisor, corrected_matrix, raw_counts) {
+  if (!mode %in% c("fixed", "auto")) {
+    stop(glue::glue("❌ ercc_divisor_mode must be 'fixed' or 'auto', got '{mode}'."))
+  }
+  if (mode == "fixed") {
+    return(fixed_divisor)
+  }
+  raw_matched <- as.matrix(raw_counts)[rownames(corrected_matrix), colnames(corrected_matrix), drop = FALSE]
+  sum(2^corrected_matrix, na.rm = TRUE) / sum(raw_matched, na.rm = TRUE)
 }
 ```
 
@@ -1332,9 +1364,17 @@ if (isTRUE(params$useERCC)) {
   # This is the shared source of "ERCC-corrected counts" reused by edgeR and
   # DESeq2 below (see convert_ercc_corrected_log2rpkm_to_counts() and the
   # naming caveat in the ercc_methodology chunk above).
+  # `ready_for_deg_raw_counts` is still the untouched raw count matrix here
+  # (ERCC substitution happens later, in the edgeR/DESeq2 sections).
+  ercc_divisor_used <- resolve_ercc_divisor(
+    mode = params$ercc_divisor_mode,
+    fixed_divisor = params$rpkm_to_counts_divisor,
+    corrected_matrix = ercc_corrected_log2rpkm_counts,
+    raw_counts = ready_for_deg_raw_counts
+  )
   ercc_corrected_counts <- convert_ercc_corrected_log2rpkm_to_counts(
     log2rpkm_matrix = ercc_corrected_log2rpkm_counts,
-    divisor = params$rpkm_to_counts_divisor
+    divisor = ercc_divisor_used
   )
   ercc_corrected_counts_for_output <- as.data.frame(ercc_corrected_counts) %>%
     rownames_to_column(var = "gene")
@@ -1347,29 +1387,28 @@ if (isTRUE(params$useERCC)) {
               row.names = FALSE)
   print(glue::glue("💾 ERCC-corrected counts (shared by edgeR/DESeq2) saved to: ", ercc_corrected_counts_file))
 
-  # Data-driven reference divisor (diagnostic only -- does not change what's
-  # actually used unless rpkm_to_counts_divisor is set to this value).
-  #
-  # rpkm_to_counts_divisor is a single dataset-wide constant applied
-  # identically to every sample, so it rescales magnitude only -- it does NOT
-  # re-equalize samples the way per-sample library-size normalization would,
-  # so a genuine global shift (e.g. from DRB) is preserved either way. What
-  # it DOES affect is whether edgeR/DESeq2 see numbers in a realistic
-  # sequencing-depth range, which matters for their dispersion modeling.
-  #
-  # This computes the ratio that would rescale the grand total of the
-  # ERCC-corrected (molecule-scale) values to match the grand total of the
-  # actual observed raw read counts in this dataset, i.e.:
-  #   divisor = sum(2^ercc_corrected_log2rpkm_counts) / sum(raw read counts)
-  # `ready_for_deg_raw_counts` at this point in the pipeline is still the
-  # untouched original raw count matrix (ERCC substitution happens later, in
-  # the edgeR/DESeq2 sections).
-  data_driven_divisor <- sum(2^ercc_corrected_log2rpkm_counts, na.rm = TRUE) /
-    sum(ready_for_deg_raw_counts, na.rm = TRUE)
-  print(glue::glue(
-    "ℹ️ Data-driven reference divisor for this dataset: {format(data_driven_divisor, digits = 6, scientific = TRUE)} ",
-    "(currently using rpkm_to_counts_divisor = {params$rpkm_to_counts_divisor})"
-  ))
+  # The divisor is one dataset-wide constant applied identically to every
+  # sample, so it rescales magnitude only and does NOT re-equalize samples the
+  # way per-sample normalization would; a genuine global shift (e.g. DRB) is
+  # preserved in either mode. In "fixed" mode the data-driven value is printed
+  # for reference only.
+  data_driven_divisor <- resolve_ercc_divisor(
+    mode = "auto",
+    fixed_divisor = params$rpkm_to_counts_divisor,
+    corrected_matrix = ercc_corrected_log2rpkm_counts,
+    raw_counts = ready_for_deg_raw_counts
+  )
+  if (identical(params$ercc_divisor_mode, "auto")) {
+    print(glue::glue(
+      "ℹ️ ercc_divisor_mode = 'auto': using data-driven divisor {format(ercc_divisor_used, digits = 6)} ",
+      "(sum of ERCC-corrected values / sum of raw read counts for the samples in this run)."
+    ))
+  } else {
+    print(glue::glue(
+      "ℹ️ ercc_divisor_mode = 'fixed': using divisor {format(ercc_divisor_used, digits = 6)}. ",
+      "Data-driven reference divisor for this dataset: {format(data_driven_divisor, digits = 6, scientific = TRUE)}."
+    ))
+  }
   if (isTRUE(params$usebatch)) {
     ercc_corrected_log2rpkm_counts_batch_corrected_file <- file.path(counts_dir, "limma_ERCC_corrected_log2rpkm_counts_batch_corrected.tsv")
     as.data.frame(ercc_corrected_log2rpkm_counts_batch_corrected) %>%
@@ -1723,7 +1762,7 @@ if (isTRUE(params$useERCC)) {
   # Use ERCC-corrected counts (see ercc_methodology chunk) in place of raw
   # counts, so edgeR's dispersion/filtering operate on the ERCC-calibrated scale.
   ready_for_deg_raw_counts <- round(ercc_corrected_counts)
-  print(glue::glue("✅ Using ERCC-corrected counts as input to edgeR (divisor = {params$rpkm_to_counts_divisor})."))
+  print(glue::glue("✅ Using ERCC-corrected counts as input to edgeR (divisor = {format(ercc_divisor_used, digits = 6)}, mode = {params$ercc_divisor_mode})."))
 }
 
 dge_edger <- DGEList(counts = ready_for_deg_raw_counts, samples = samples, group = samples[[params$group_column]])
@@ -2215,7 +2254,7 @@ if (isTRUE(params$useERCC)) {
   # Use ERCC-corrected counts (see ercc_methodology chunk) in place of raw
   # counts, so DESeq2's dispersion/filtering operate on the ERCC-calibrated scale.
   ready_for_deg_raw_counts <- round(ercc_corrected_counts)
-  print(glue::glue("✅ Using ERCC-corrected counts as input to DESeq2 (divisor = {params$rpkm_to_counts_divisor})."))
+  print(glue::glue("✅ Using ERCC-corrected counts as input to DESeq2 (divisor = {format(ercc_divisor_used, digits = 6)}, mode = {params$ercc_divisor_mode})."))
 }
 
 is_ercc <- grepl("^ERCC", rownames(ready_for_deg_raw_counts))
@@ -2700,7 +2739,7 @@ ERCC CALIBRATION (per-sample linear fit: log2(ERCC_RPKM) ~ log2(known ERCC conce
   - Slope (response/sensitivity factor):  mean = {format(mean(ercc_qc$Slope), digits = 3)}, sd = {format(sd(ercc_qc$Slope), digits = 3)}
   - Intercept (sample baseline offset):    mean = {format(mean(ercc_qc$Intercept), digits = 3)}, sd = {format(sd(ercc_qc$Intercept), digits = 3)}
   - Correction: corrected_log2_RPKM = (raw_log2_RPKM - intercept) / slope
-  - rpkm_to_counts_divisor used for edgeR/DESeq2 count reconstruction: {params$rpkm_to_counts_divisor}
+  - ERCC divisor used for edgeR/DESeq2 count reconstruction: {format(ercc_divisor_used, digits = 6)} (ercc_divisor_mode = {params$ercc_divisor_mode})
 
 METHOD-SPECIFIC IMPLEMENTATION:
   1. limma:  input = ERCC-corrected log2(RPKM); no voom; standard lmFit/eBayes.

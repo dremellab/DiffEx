@@ -258,6 +258,11 @@ def deg(
     samplesheet: Path = typer.Option(..., "--samplesheet", "-s", help="Sample sheet TSV/CSV"),
     use_ercc: bool = typer.Option(False, "--use-ercc", help="Whether to use ERCC spike-ins"),
     ercc_mix: int = typer.Option(1, "--ercc-mix", help="ERCC mix (1 or 2)"),
+    ercc_divisor_mode: str = typer.Option(
+        "fixed", "--ercc-divisor-mode",
+        help='With --use-ercc: scaling divisor for edgeR/DESeq2 input. "fixed" = historical constant (20000); '
+             '"auto" = derived from the data (sum of ERCC-corrected values / sum of raw counts).',
+    ),
     group1: str = typer.Option(..., "--group1", help="First group name"),
     group2: str = typer.Option(..., "--group2", help="Second group name"),
     sample_column: str = typer.Option("sampleName", "--sample-column", help="Column in sample sheet for sample IDs"),
@@ -303,6 +308,12 @@ def deg(
             typer.secho("❌ --batch-column cannot be the same as --group-column", fg=typer.colors.RED)
             raise typer.Exit(code=2)
         
+    if ercc_divisor_mode not in ("fixed", "auto"):
+        typer.secho('❌ --ercc-divisor-mode must be "fixed" or "auto"', fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+    if ercc_divisor_mode != "fixed" and not use_ercc:
+        typer.secho("⚠️ --ercc-divisor-mode is ignored without --use-ercc", fg=typer.colors.YELLOW)
+
     # Prepare qmd
     # 1. check if outdir exists and is writable
     # 2. find the right packaged qmd
@@ -319,6 +330,7 @@ def deg(
         samplesheet=str(samplesheet),
         useERCC=use_ercc,
         ercc_mix=ercc_mix,
+        ercc_divisor_mode=ercc_divisor_mode,
         group1=group1,
         group2=group2,
         sample_column=sample_column,

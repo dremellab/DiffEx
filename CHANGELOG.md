@@ -1,3 +1,13 @@
+# Unreleased
+
+- Added `--ercc-divisor-mode [fixed|auto]` to `diffex deg` (`ercc_divisor_mode` in `deg.qmd`).
+  With `--use-ercc`, edgeR/DESeq2 receive `round(2^corrected / divisor)`. `fixed` (default)
+  keeps the historical divisor of 20000 and leaves output unchanged; `auto` derives one
+  dataset-wide divisor from the data (sum of ERCC-corrected values / sum of raw read counts),
+  which preserves differences between samples (including genuine global shifts) while putting
+  the pseudo-counts on a realistic scale. The divisor used is reported in the summary. A guard
+  now stops with a clear message if the rescaled values would exceed R's integer limit.
+
 # v0.5.7
 
 **Release date:** August 17, 2026

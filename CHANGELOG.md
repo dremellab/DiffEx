@@ -8,6 +8,13 @@
   the pseudo-counts on a realistic scale. The divisor used is reported in the summary. A guard
   now stops with a clear message if the rescaled values would exceed R's integer limit.
 
+- **Behavior change (edgeR, `useERCC=TRUE` only):** edgeR now uses a constant library size
+  across samples. Previously `norm.factors = 1` disabled TMM, but edgeR still scaled every
+  sample by its own library size (the total of the ERCC-corrected counts), which re-normalized
+  away the global shifts the ERCC anchoring is meant to preserve (e.g. DRB). edgeR results and
+  `edgeR_ERCC_corrected_logCPM_counts.tsv` therefore change and now agree with limma/DESeq2 on
+  the global shift. limma and DESeq2 are unchanged; the TMM path (`useERCC=FALSE`) is unchanged.
+
 # v0.5.7
 
 **Release date:** August 17, 2026

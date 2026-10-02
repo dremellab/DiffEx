@@ -694,7 +694,8 @@ for (s in colnames(ercc_corrected_log2rpkm_counts)) {
 #   - limma:  uses ercc_corrected_log2rpkm_counts directly (already log2 scale,
 #             so voom is never invoked on this path -- see limma section).
 #   - edgeR:  rescales corrected values to a count-like scale (below),
-#             then sets norm.factors = 1 to disable TMM.
+#             then sets norm.factors = 1 (TMM off) and holds lib.size constant
+#             across samples (edgeR's own per-sample library-size scaling off).
 #   - DESeq2: rescales corrected values to a count-like scale (below),
 #             then sets sizeFactors = 1 to disable median-of-ratios.
 #
@@ -1802,12 +1803,23 @@ print(glue::glue("🔍 ERCC genes after filtering: ", nercc_genes_kept))
 dge_final <- dge_filtered
 
 if (isTRUE(params$useERCC)) {
-  # ERCC-corrected counts already carry the external calibration -- disabling
-  # TMM here (norm.factors = 1) prevents edgeR from re-normalizing against
-  # endogenous genes and erasing genuine global transcriptional changes.
+  # ERCC-corrected counts already carry the external calibration. Two things
+  # would otherwise re-normalize samples against each other and erase genuine
+  # global transcriptional changes:
+  #   1. TMM -> disabled with norm.factors = 1.
+  #   2. edgeR's per-sample library-size scaling: the model offset is
+  #      log(lib.size * norm.factors), and lib.size is each sample's own total
+  #      (here the total of the ERCC-corrected pseudo-counts), so norm.factors = 1
+  #      alone still divides every sample by its own total. Holding lib.size
+  #      constant across samples makes the offset identical for all samples.
+  # The constant's value does not affect comparisons between samples; the mean
+  # keeps CPM values on a familiar scale.
   # See ercc_methodology chunk above for the full rationale.
-  print(glue::glue("✅ ERCC-corrected counts: disabling edgeR's TMM normalization (norm.factors = 1)."))
+  edger_real_lib_size <- setNames(dge_final$samples$lib.size, rownames(dge_final$samples))
+  print(glue::glue("✅ ERCC-corrected counts: disabling edgeR's TMM normalization (norm.factors = 1) ",
+                   "and holding the library size constant across samples (so a global shift is preserved)."))
   dge_final$samples$norm.factors <- rep(1, ncol(dge_final))
+  dge_final$samples$lib.size <- rep(mean(dge_final$samples$lib.size), ncol(dge_final))
 } else {
   print(glue::glue("ℹ️ Using TMM normalization."))
   dge_final <- calcNormFactors(dge_final)
@@ -1827,7 +1839,7 @@ if (isTRUE(params$useERCC)) {
       rownames_to_column(var = "Sample") %>%
       mutate(
         Group = group,
-        LibrarySize = lib.size,
+        LibrarySize = if (isTRUE(params$useERCC)) edger_real_lib_size[Sample] else lib.size,
         NormFactor = signif(norm.factors, 3),
         Batch = if ("batch" %in% colnames(.)) batch else NA
   ) %>%
@@ -1836,7 +1848,11 @@ if (isTRUE(params$useERCC)) {
   
   DT::datatable(
     edger_sampleinfo_df,
-    caption = "📊 Library Sizes and Normalization Factors",
+    caption = if (isTRUE(params$useERCC)) {
+      "📊 Library Sizes (totals of ERCC-corrected counts; edgeR uses a constant library size across samples) and Normalization Factors"
+    } else {
+      "📊 Library Sizes and Normalization Factors"
+    },
     rownames = FALSE,
     options = list(pageLength = 20, autoWidth = TRUE)
   )
@@ -1848,16 +1864,17 @@ if (isTRUE(params$useERCC)) {
 #| message: true
 #| warning: false
 # Save normalized counts to a file
-# NOTE: when useERCC=TRUE, dge_final$samples$norm.factors is fixed at 1 (see
-# setup_edger chunk), so this logCPM already reflects ERCC-corrected counts
-# rather than TMM-normalized library sizes.
+# NOTE: when useERCC=TRUE, dge_final$samples$norm.factors is fixed at 1 and
+# lib.size is held constant across samples (see setup_edger chunk), so this
+# logCPM reflects ERCC-corrected counts on a common scale and preserves global
+# shifts, rather than TMM-normalized or per-sample library-size-scaled values.
 normalized_counts_edger <- as.data.frame(cpm(dge_final, normalized.lib.sizes = TRUE, log = TRUE))
 normalized_counts_edger %>%
   rownames_to_column(var = "gene") -> normalized_counts_edger_for_plots
 
 if (isTRUE(params$useERCC)) {
   normalized_counts_file <- file.path(counts_dir, "edgeR_ERCC_corrected_logCPM_counts.tsv")
-  normalized_counts_note <- "logCPM of ERCC-corrected counts (norm.factors = 1; TMM disabled)"
+  normalized_counts_note <- "logCPM of ERCC-corrected counts (norm.factors = 1, constant library size across samples; TMM and per-sample library-size scaling disabled)"
 } else {
   normalized_counts_file <- file.path(counts_dir, "edgeR_TMM_normalized_logCPM_counts.tsv")
   normalized_counts_note <- "TMM-normalized logCPM counts"
@@ -1924,9 +1941,14 @@ if (isTRUE(params$usebatch)) {
 #| warning: false
 
 
-# Before normalization (assumes raw counts, norm.factors = 1)
+# Before normalization (assumes raw counts, norm.factors = 1). With useERCC the
+# real per-sample totals are restored so this shows plain per-sample CPM, for
+# comparison with the constant-library-size values used for the analysis.
 dge_raw <- dge_final
 dge_raw$samples$norm.factors <- 1
+if (isTRUE(params$useERCC)) {
+  dge_raw$samples$lib.size <- edger_real_lib_size[rownames(dge_raw$samples)]
+}
 logcpm_before <- cpm(dge_raw, log = TRUE)
 logcpm_before <- logcpm_before %>% as.data.frame() %>% tibble::rownames_to_column("gene")
 
@@ -2743,7 +2765,7 @@ ERCC CALIBRATION (per-sample linear fit: log2(ERCC_RPKM) ~ log2(known ERCC conce
 
 METHOD-SPECIFIC IMPLEMENTATION:
   1. limma:  input = ERCC-corrected log2(RPKM); no voom; standard lmFit/eBayes.
-  2. edgeR:  input = ERCC-corrected integer counts; norm.factors = 1 (TMM disabled).
+  2. edgeR:  input = ERCC-corrected integer counts; norm.factors = 1 (TMM disabled) and a constant library size across samples (no per-sample scaling).
   3. DESeq2: input = ERCC-corrected integer counts; sizeFactors = 1 (median-of-ratios disabled).
 
 WHY: Default normalization (TMM, median-of-ratios) assumes a roughly constant

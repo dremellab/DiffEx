@@ -2740,6 +2740,27 @@ volcano_plotly
 
 ## ERCC Normalization Summary
 
+```{r ercc_divisor_report}
+#| echo: false
+#| results: asis
+
+if (isTRUE(params$useERCC)) {
+  cat("\n::: {.callout-note}\n### ERCC divisor used for edgeR and DESeq2\n\n")
+  cat(sprintf("**Divisor: %s** — **Mode: `%s`**\n\n",
+              format(ercc_divisor_used, digits = 10, scientific = FALSE, trim = TRUE),
+              params$ercc_divisor_mode))
+  cat("Count input is reconstructed as `round(2^corrected / divisor)`. ",
+      "The same divisor is applied to every sample; limma uses the corrected log2 values directly.\n\n", sep = "")
+  if (identical(params$ercc_divisor_mode, "auto")) {
+    cat("The divisor is recomputed for each run as `sum(2^corrected) / sum(raw counts)` ",
+        "over matching genes and samples. Its value can differ between runs with different samples.\n\n", sep = "")
+  } else {
+    cat("The divisor is the configured `rpkm_to_counts_divisor` (default: 20000).\n\n")
+  }
+  cat(":::\n\n")
+}
+```
+
 ```{r ercc_summary}
 #| code-fold: true
 #| code-summary: "🧬 ERCC Normalization Summary (All Methods)"

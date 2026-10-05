@@ -1,3 +1,30 @@
+# v0.6.0
+
+**Release date:** October 5, 2026
+
+- Added `--ercc-divisor-mode [fixed|auto]` to `diffex deg` (`ercc_divisor_mode` in `deg.qmd`).
+  With `--use-ercc`, edgeR/DESeq2 receive `round(2^corrected / divisor)`. `fixed` (default)
+  keeps the historical divisor of 20000; edgeR results still change because of the
+  library-size fix described below. `auto` derives one
+  dataset-wide divisor from the data (sum of ERCC-corrected values / sum of raw read counts),
+  which preserves differences between samples (including genuine global shifts) while putting
+  the pseudo-counts on a realistic scale. The divisor used is reported in the summary. A guard
+  now stops with a clear message if the rescaled values would exceed R's integer limit.
+
+- **Behavior change (edgeR, `useERCC=TRUE` only):** edgeR now uses a constant library size
+  across samples. Previously `norm.factors = 1` disabled TMM, but edgeR still scaled every
+  sample by its own library size (the total of the ERCC-corrected counts), which re-normalized
+  away the global shifts the ERCC anchoring is meant to preserve (e.g. DRB). edgeR results and
+  `edgeR_ERCC_corrected_logCPM_counts.tsv` therefore change and now agree with limma/DESeq2 on
+  the global shift. limma and DESeq2 are unchanged; the TMM path (`useERCC=FALSE`) is unchanged.
+
+- Fixed the ERCC before/after comparison plots by aligning genes before extracting
+  sample values and explicitly rendering the plot. Added a visible HTML callout with
+  the resolved divisor, mode, and per-run recomputation explanation.
+
+- ERCC-enabled output filenames now explicitly identify ERCC-corrected values.
+  Downstream workflows using the earlier filenames must be updated.
+
 # v0.5.7
 
 **Release date:** August 17, 2026

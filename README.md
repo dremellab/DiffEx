@@ -127,6 +127,9 @@ diffex --help
 │ *  --samplesheet                      -s      PATH     Sample sheet TSV/CSV [default: None] [required]   │
 │    --use-ercc                                          Whether to use ERCC spike-ins                     │
 │    --ercc-mix                                 INTEGER  ERCC mix (1 or 2) [default: 1]                    │
+│    --ercc-divisor-mode                        TEXT     With --use-ercc: edgeR/DESeq2 scaling divisor,    │
+│                                                        "fixed" (20000) or "auto" (data-driven)          │
+│                                                        [default: fixed]                                  │
 │ *  --group1                                   TEXT     First group name [default: None] [required]       │
 │ *  --group2                                   TEXT     Second group name [default: None] [required]      │
 │    --sample-column                            TEXT     Column in sample sheet for sample IDs             │

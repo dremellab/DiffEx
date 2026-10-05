@@ -788,12 +788,12 @@ if (isTRUE(params$useERCC)) {
   sample_name <- colnames(log2_rpkm_counts)[sample_idx]
 
   before_correction <- log2_rpkm_counts[, sample_idx]
-  after_correction <- ercc_corrected_log2rpkm_counts[, sample_idx]
+  after_correction <- ercc_corrected_log2rpkm_counts[rownames(log2_rpkm_counts), sample_name]
 
   correction_comparison <- data.frame(
     gene = rownames(log2_rpkm_counts),
     before = before_correction,
-    after = after_correction[rownames(log2_rpkm_counts)]
+    after = after_correction
   )
   correction_comparison <- correction_comparison[
     !apply(correction_comparison[, c("before", "after")], 1,
@@ -830,7 +830,7 @@ if (isTRUE(params$useERCC)) {
       fill = "Gene Type"
     )
 
-  ggpubr::ggarrange(p1, p2, ncol = 2, common.legend = TRUE, legend = "bottom")
+  print(ggpubr::ggarrange(p1, p2, ncol = 2, common.legend = TRUE, legend = "bottom"))
 
   ercc_mean_correction <- mean(correction_comparison$correction_applied[correction_comparison$type == "ERCC"])
   endo_mean_correction <- mean(correction_comparison$correction_applied[correction_comparison$type == "Endogenous"])
